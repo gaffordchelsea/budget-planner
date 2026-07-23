@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Budget Planner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>My Budget Planner</h1>
+  <p>Plan • Track • Save • Grow</p>
+</header>
+
+<nav class="main-navigation">
+  <button data-page="dashboard" onclick="showPage('dashboard')">Dashboard</button>
+  <button data-page="budgetCycle" onclick="showPage('budgetCycle')">Budget Cycle</button>
+  <button data-page="history" onclick="showPage('history')">History</button>
+  <button data-page="reports" onclick="showPage('reports')">Reports</button>
+  <button data-page="settings" onclick="showPage('settings')">Settings</button>
+</nav>
+
+<main>
+
+  <!-- =========================
+       DASHBOARD
+       ========================= -->
+  <section id="dashboard" class="page">
+    <h2>Financial Dashboard</h2>
+
+    <div class="dashboard-cards">
+      <div class="card">
+        <h3>Total Income</h3>
+        <p id="dashboardIncome">$0</p>
+      </div>
+      <div class="card">
+        <h3>Total Bills</h3>
+        <p id="dashboardBills">$0</p>
+      </div>
+      <div class="card">
+        <h3>Total Savings</h3>
+        <p id="dashboardSavings">$0</p>
+      </div>
+      <div class="card">
+        <h3>Money Remaining</h3>
+        <p id="dashboardRemaining">$0</p>
+      </div>
+    </div>
+
+    <h3>Income Breakdown</h3>
+    <div class="income-cards">
+      <div class="card">
+        <h4>Home Health</h4>
+        <p id="homeHealthIncome">$0</p>
+      </div>
+      <div class="card">
+        <h4>Walmart / Spark</h4>
+        <p id="sparkIncome">$0</p>
+      </div>
+      <div class="card">
+        <h4>Child Support</h4>
+        <p id="childSupportIncome">$0</p>
+      </div>
+    </div>
+
+    <h3>Goal Progress</h3>
+    <div id="dashboardGoalProgress"></div>
+
+    <h3>Financial Health Score</h3>
+    <div class="health-score">
+      <p id="healthScore">0 / 100</p>
+    </div>
+  </section>
+
+  <!-- =========================
+       BUDGET CYCLE
+       ========================= -->
+  <section id="budgetCycle" class="page hidden">
+    <h2 id="currentCycleTitle">July - December</h2>
+
+    <div id="monthButtons" class="month-buttons"></div>
+
+    <div id="monthArea"></div>
+  </section>
+
+  <!-- =========================
+       HISTORY
+       ========================= -->
+  <section id="history" class="page hidden">
+    <h2>Budget History</h2>
+    <p>Previous 6-month cycles will be saved here.</p>
+    <div id="historyArea"></div>
+  </section>
+
+  <!-- =========================
+       REPORTS
+       ========================= -->
+  <section id="reports" class="page hidden">
+    <h2>Reports</h2>
+
+    <div class="report-card">
+      <h3>Monthly Reports</h3>
+      <div id="monthlyReports"></div>
+    </div>
+
+    <div class="report-card">
+      <h3>Six Month Reports</h3>
+      <div id="cycleReports"></div>
+    </div>
+
+    <div class="chart-area">
+      <h3>Charts</h3>
+      <canvas id="incomeChart"></canvas>
+      <canvas id="goalChart"></canvas>
+      <canvas id="sparkChart"></canvas>
+    </div>
+  </section>
+
+  <!-- =========================
+       SETTINGS
+       ========================= -->
+  <section id="settings" class="page hidden">
+    <h2>Settings</h2>
+
+    <h3>Money Priority Order</h3>
+    <p>The planner will use your personal priority order when assigning extra money.</p>
+    <div id="prioritySettings"></div>
+    <button onclick="addPriority()">Add Priority</button>
+
+    <h3>Default Spending Categories</h3>
+    <label for="settingsCategories">Enter categories separated by commas</label>
+    <input id="settingsCategories" type="text" oninput="updateDefaultCategories(this.value)">
+
+    <h3>Data Backup</h3>
+    <button onclick="exportBudget()">Export Budget</button>
+    <button onclick="openImport()">Import Budget</button>
+    <input type="file" id="importInput" hidden>
+  </section>
+
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>
