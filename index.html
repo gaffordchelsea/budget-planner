@@ -28,8 +28,13 @@
       <label for="authPassword">Password</label>
       <input type="password" id="authPassword" required autocomplete="current-password" minlength="6">
 
-      <button type="submit" id="authSubmitButton">Continue</button>
+      <button type="submit" id="authSubmitButton">Sign In</button>
     </form>
+
+    <div class="auth-mode-switch">
+      <span id="authModeText">Don't have an account?</span>
+      <button type="button" id="authModeToggle" class="text-button" onclick="toggleAuthMode()">Create one</button>
+    </div>
 
     <p id="authStatus" class="auth-status hidden"></p>
     <p id="authError" class="auth-error hidden"></p>

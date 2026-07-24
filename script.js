@@ -51,6 +51,7 @@ let activeSparkOrderIndex = -1;
 let activeSparkSection = "shifts";
 
 let currentUserId = null;
+let authMode = "signIn";
 let themePrefs = {
   mode: "light",
   accent: DEFAULT_ACCENT_COLOR,
@@ -63,6 +64,39 @@ let themePrefs = {
 };
 let saveStateTimeout = null;
 let saveThemeTimeout = null;
+
+function openAuthPage(defaultMode = "signIn") {
+  authMode = defaultMode;
+  updateAuthModeUI();
+  document.getElementById("authGate").classList.remove("hidden");
+}
+
+function showWelcomePage() {
+  document.getElementById("authGate").classList.add("hidden");
+}
+
+function toggleAuthMode() {
+  authMode = authMode === "signIn" ? "signUp" : "signIn";
+  clearAuthError();
+  clearAuthStatus();
+  updateAuthModeUI();
+}
+
+function updateAuthModeUI() {
+  const submitButton = document.getElementById("authSubmitButton");
+  const modeText = document.getElementById("authModeText");
+  const modeToggle = document.getElementById("authModeToggle");
+
+  if (authMode === "signUp") {
+    submitButton.textContent = "Create Account";
+    modeText.textContent = "Already have an account?";
+    modeToggle.textContent = "Sign In";
+  } else {
+    submitButton.textContent = "Sign In";
+    modeText.textContent = "Don't have an account?";
+    modeToggle.textContent = "Create one";
+  }
+}
 
 function initializeAuth() {
   bindImportListener();
@@ -77,13 +111,39 @@ function initializeAuth() {
   });
 }
 
-function openAuthPage() {
-  document.getElementById("authGate").classList.remove("hidden");
-  document.getElementById("authSubmitButton").textContent = "Continue";
-}
+function handleAuthSubmit(event) {
+  event.preventDefault();
+  const email = document.getElementById("authEmail").value.trim();
+  const password = document.getElementById("authPassword").value;
 
-function showWelcomePage() {
-  document.getElementById("authGate").classList.add("hidden");
+  clearAuthError();
+  setAuthStatus(authMode === "signUp" ? "Creating account..." : "Signing in...");
+
+  if (authMode === "signUp") {
+    auth.createUserWithEmailAndPassword(email, password)
+      .then(() => {
+        clearAuthStatus();
+      })
+      .catch((error) => {
+        clearAuthStatus();
+        setAuthError(friendlyAuthError(error));
+      });
+    return;
+  }
+
+  auth.signInWithEmailAndPassword(email, password)
+    .then(() => {
+      clearAuthStatus();
+    })
+    .catch((error) => {
+      if (error.code === "auth/user-not-found") {
+        clearAuthStatus();
+        setAuthError("No account found. Switch to Create Account to register.");
+      } else {
+        clearAuthStatus();
+        setAuthError(friendlyAuthError(error));
+      }
+    });
 }
 
 function getUserDocRef() {
@@ -109,8 +169,6 @@ async function startAppForUser(user) {
       plannerState = normalizeState(data.plannerState);
       themePrefs = data.themePrefs || { mode: "light", accent: DEFAULT_ACCENT_COLOR };
     } else {
-      // New account: pull in any budget already sitting in this browser's
-      // local storage from before accounts existed, so nothing is lost.
       const legacyState = loadLegacyLocalState();
       plannerState = legacyState ? normalizeState(legacyState) : buildDefaultState();
       themePrefs = loadLegacyThemePrefs();
@@ -198,7 +256,19 @@ function handleAuthSubmit(event) {
   const password = document.getElementById("authPassword").value;
 
   clearAuthError();
-  setAuthStatus("Signing in...");
+  setAuthStatus(authMode === "signUp" ? "Creating account..." : "Signing in...");
+
+  if (authMode === "signUp") {
+    auth.createUserWithEmailAndPassword(email, password)
+      .then(() => {
+        clearAuthStatus();
+      })
+      .catch((error) => {
+        clearAuthStatus();
+        setAuthError(friendlyAuthError(error));
+      });
+    return;
+  }
 
   auth.signInWithEmailAndPassword(email, password)
     .then(() => {
@@ -206,15 +276,8 @@ function handleAuthSubmit(event) {
     })
     .catch((error) => {
       if (error.code === "auth/user-not-found") {
-        setAuthStatus("No account found. Creating one now...");
-        auth.createUserWithEmailAndPassword(email, password)
-          .then(() => {
-            clearAuthStatus();
-          })
-          .catch((createError) => {
-            clearAuthStatus();
-            setAuthError(friendlyAuthError(createError));
-          });
+        clearAuthStatus();
+        setAuthError("No account found. Switch to Create Account to register.");
       } else {
         clearAuthStatus();
         setAuthError(friendlyAuthError(error));
