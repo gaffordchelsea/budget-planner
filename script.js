@@ -844,10 +844,33 @@ function getWeeklySparkIncome(month, week) {
   }, 0);
 }
 
+function getWeeklyIncomeEntriesTotal(month, week) {
+  const weekStart = parseDateInput(week.startDate);
+  const weekEnd = parseDateInput(week.endDate);
+  if (!weekStart || !weekEnd || !Array.isArray(month.income)) {
+    return 0;
+  }
+
+  return month.income.reduce((sum, entry) => {
+    if (!entry || !entry.date) {
+      return sum;
+    }
+    const entryDate = parseDateInput(entry.date);
+    if (!entryDate || entryDate < weekStart || entryDate > weekEnd) {
+      return sum;
+    }
+    if (/spark/i.test(entry.source || "")) {
+      return sum;
+    }
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+}
+
 function getWeekIncomeTotal(month, week) {
   return (Number(week.homeHealthIncome) || 0)
     + (Number(week.childSupportIncome) || 0)
-    + getWeeklySparkIncome(month, week);
+    + getWeeklySparkIncome(month, week)
+    + getWeeklyIncomeEntriesTotal(month, week);
 }
 
 function getWeeklyIncomeTotal(month) {
@@ -1132,7 +1155,7 @@ function renderWeeklyTracker() {
         </div>
         <div class="week-detail-grid">
           <div class="entry-card">
-            <h4>Monthly Income Entries</h4>
+            <h4>Weekly Income Entries</h4>
             ${month.income.map((entry, index) => {
               const isSparkSource = /spark/i.test(entry.source || "");
               const displayAmount = isSparkSource ? getSparkSummary(month).totalEarnings : Number(entry.amount) || 0;
@@ -1956,6 +1979,7 @@ function addIncomeRow() {
   getSelectedMonthData().income.push({ source: "Other Income", date: "", amount: "", notes: "" });
   saveState();
   renderIncomeSection();
+  renderWeeklyTracker();
   renderDashboard();
   renderReports();
 }
@@ -1971,6 +1995,8 @@ function updateIncomeField(index, field, value) {
   }
   month.income[index][field] = field === "amount" ? Number(value) || 0 : value;
   saveState();
+  renderIncomeSection();
+  renderWeeklyTracker();
   renderDashboard();
   renderReports();
 }
@@ -1984,6 +2010,7 @@ function removeIncomeRow(index) {
   month.income.splice(index, 1);
   saveState();
   renderIncomeSection();
+  renderWeeklyTracker();
   renderDashboard();
   renderReports();
 }
