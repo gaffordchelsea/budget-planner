@@ -21,8 +21,9 @@ let plannerState = null;
 let activeCycleId = null;
 let activeMonthName = null;
 let activeMonthSection = "overview";
-let activeWeeklyIndex = 0;
+let activeWeeklyIndex = -1;
 let activeSparkOrderIndex = -1;
+let activeSparkSection = "shifts";
 
 function initializePlanner() {
   plannerState = loadState();
@@ -78,6 +79,15 @@ function normalizeState(state) {
   }
 
   state.cycles = state.cycles.map((cycle) => normalizeCycle(cycle));
+  state.cycles.forEach((cycle) => {
+    cycle.months.forEach((month) => {
+      month.income.forEach((entry) => {
+        if (entry.source === "Home Health") {
+          entry.source = "Main Job";
+        }
+      });
+    });
+  });
   state.currentCycleId = state.currentCycleId || state.cycles[0].id;
   state.lastOpenedMonth = state.lastOpenedMonth || getCurrentMonthName();
   state.priorities = Array.isArray(state.priorities) && state.priorities.length
@@ -116,6 +126,7 @@ function normalizeCycle(cycle) {
   }
 
   cycle.months = cycle.months.slice(0, 6);
+  cycle.months.forEach(migrateUntouchedJuly2026Weeks);
   return cycle;
 }
 
@@ -144,7 +155,7 @@ function createMonthData(name, year) {
     name,
     year,
     income: [
-      { source: "Home Health", date: "", amount: "", notes: "" },
+      { source: "Main Job", date: "", amount: "", notes: "" },
       { source: "Walmart/Spark", date: "", amount: "", notes: "" },
       { source: "Child Support", date: "", amount: "", notes: "" },
       { source: "Other Income", date: "", amount: "", notes: "" }
@@ -206,19 +217,35 @@ function formatDisplayDate(value) {
     const [year, month, day] = parts.map((part) => Number(part));
     if ([year, month, day].every((part) => Number.isFinite(part))) {
       const date = new Date(year, month - 1, day);
-      return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      return formatShortDate(date);
     }
   }
 
   const parsed = new Date(trimmed);
   if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    return formatShortDate(parsed);
   }
 
   return trimmed;
 }
 
+function formatShortDate(date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const year = String(date.getFullYear()).slice(-2);
+  return `${month}/${day}/${year}`;
+}
+
 function createDefaultWeeks(monthName, year) {
+  // July 2026 starts partway through the month. Future Julys use the
+  // normal full-month schedule below.
+  if (monthName === "July" && year === 2026) {
+    return [
+      createWeekData("Week 1", "2026-07-20", "2026-07-27"),
+      createWeekData("Week 2", "2026-07-28", "2026-07-31")
+    ];
+  }
+
   const weeks = [];
   const monthStart = new Date(year, getMonthIndex(monthName), 1);
   const monthEnd = new Date(year, getMonthIndex(monthName) + 1, 0);
@@ -234,23 +261,55 @@ function createDefaultWeeks(monthName, year) {
     if (weekEnd.getMonth() !== monthStart.getMonth()) {
       weekEnd.setMonth(monthStart.getMonth(), Math.min(weekEnd.getDate(), monthEnd.getDate()));
     }
-    weeks.push({
-      name: `Week ${index + 1}`,
-      startDate: formatDateInput(weekStart),
-      endDate: formatDateInput(weekEnd),
-      homeHealthIncome: "",
-      childSupportIncome: "",
-      income: [],
-      bills: [],
-      savingsDeposits: [],
-      goals: [],
-      expenses: [],
-      notes: ""
-    });
+    weeks.push(createWeekData(
+      `Week ${index + 1}`,
+      formatDateInput(weekStart),
+      formatDateInput(weekEnd)
+    ));
     currentStart.setDate(weekStart.getDate() + 7);
   }
 
   return weeks;
+}
+
+function createWeekData(name, startDate, endDate) {
+  return {
+    name,
+    startDate,
+    endDate,
+    homeHealthIncome: "",
+    childSupportIncome: "",
+    income: [],
+    bills: [],
+    savingsDeposits: [],
+    goals: [],
+    expenses: [],
+    notes: ""
+  };
+}
+
+// Convert the old automatic July schedule only if no entries have been added.
+function migrateUntouchedJuly2026Weeks(month) {
+  if (month.name !== "July" || month.year !== 2026 || !Array.isArray(month.weeks)) {
+    return;
+  }
+
+  const originalStartDates = ["2026-07-01", "2026-07-08", "2026-07-15", "2026-07-22", "2026-07-29"];
+  const isUntouchedDefaultSchedule = month.weeks.length === 5 && month.weeks.every((week, index) => {
+    return week.startDate === originalStartDates[index]
+      && !week.homeHealthIncome
+      && !week.childSupportIncome
+      && !(week.income || []).length
+      && !(week.bills || []).length
+      && !(week.savingsDeposits || []).length
+      && !(week.goals || []).length
+      && !(week.expenses || []).length
+      && !week.notes;
+  });
+
+  if (isUntouchedDefaultSchedule) {
+    month.weeks = createDefaultWeeks("July", 2026);
+  }
 }
 
 function ensureWeekData(month) {
@@ -323,20 +382,38 @@ function getWeeklySparkIncome(month, week) {
   }, 0);
 }
 
+function getWeekIncomeTotal(month, week) {
+  return (Number(week.homeHealthIncome) || 0)
+    + (Number(week.childSupportIncome) || 0)
+    + getWeeklySparkIncome(month, week);
+}
+
 function getWeeklyIncomeTotal(month) {
-  return ensureWeekData(month).reduce((sum, week) => sum + (Number(week.homeHealthIncome) || 0) + (Number(week.childSupportIncome) || 0) + getWeeklySparkIncome(month, week), 0);
+  return ensureWeekData(month).reduce((sum, week) => sum + getWeekIncomeTotal(month, week), 0);
+}
+
+function getWeekBillsTotal(week) {
+  return week.bills.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
 function getWeeklyBillsTotal(month) {
-  return ensureWeekData(month).reduce((sum, week) => sum + week.bills.reduce((weekSum, entry) => weekSum + (Number(entry.amount) || 0), 0), 0);
+  return ensureWeekData(month).reduce((sum, week) => sum + getWeekBillsTotal(week), 0);
+}
+
+function getWeekSavingsTotal(week) {
+  return week.savingsDeposits.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
 function getWeeklySavingsTotal(month) {
-  return ensureWeekData(month).reduce((sum, week) => sum + week.savingsDeposits.reduce((weekSum, entry) => weekSum + (Number(entry.amount) || 0), 0), 0);
+  return ensureWeekData(month).reduce((sum, week) => sum + getWeekSavingsTotal(week), 0);
+}
+
+function getWeekExpensesTotal(week) {
+  return week.expenses.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
 function getWeeklyExpensesTotal(month) {
-  return ensureWeekData(month).reduce((sum, week) => sum + week.expenses.reduce((weekSum, entry) => weekSum + (Number(entry.amount) || 0), 0), 0);
+  return ensureWeekData(month).reduce((sum, week) => sum + getWeekExpensesTotal(week), 0);
 }
 
 function getWeeklyGoalContributionTotal(month, goalName) {
@@ -379,6 +456,7 @@ function getCurrentMonthName() {
 function renderApp() {
   renderMonthButtons();
   renderMonthView();
+  renderSparkTrackerPage();
   renderDashboard();
   renderHistory();
   renderReports();
@@ -388,6 +466,14 @@ function renderApp() {
 }
 
 function showPage(pageId) {
+  if (pageId === "budgetCycle") {
+    activeWeeklyIndex = -1;
+    renderMonthView();
+  }
+  if (pageId === "sparkTracker") {
+    renderSparkTrackerPage();
+  }
+
   document.querySelectorAll(".page").forEach((page) => page.classList.add("hidden"));
   const target = document.getElementById(pageId);
   if (target) {
@@ -413,6 +499,7 @@ function renderMonthButtons() {
 
 function openMonth(monthName) {
   activeMonthName = monthName;
+  activeWeeklyIndex = -1;
   plannerState.lastOpenedMonth = monthName;
   saveState();
   renderMonthButtons();
@@ -448,7 +535,6 @@ function renderMonthView() {
         <button data-section="bills" class="tab-button ${activeMonthSection === "bills" ? "active" : ""}" onclick="showMonthSection('bills')">Bills</button>
         <button data-section="goals" class="tab-button ${activeMonthSection === "goals" ? "active" : ""}" onclick="showMonthSection('goals')">Goals</button>
         <button data-section="carFund" class="tab-button ${activeMonthSection === "carFund" ? "active" : ""}" onclick="showMonthSection('carFund')">Car Fund</button>
-        <button data-section="spark" class="tab-button ${activeMonthSection === "spark" ? "active" : ""}" onclick="showMonthSection('spark')">Spark Tracker</button>
         <button data-section="assignment" class="tab-button ${activeMonthSection === "assignment" ? "active" : ""}" onclick="showMonthSection('assignment')">Monthly Money Assignment</button>
         <button data-section="notes" class="tab-button ${activeMonthSection === "notes" ? "active" : ""}" onclick="showMonthSection('notes')">Notes</button>
       </div>
@@ -481,16 +567,6 @@ function renderMonthView() {
         <button onclick="addCarFundEntry()">Add Contribution</button>
       </section>
 
-      <section id="monthSection-spark" class="month-section hidden">
-        <h4>Spark Tracker</h4>
-        <p>Spark Earnings This Month: <span id="sparkMonthTotal">$0</span></p>
-        <div class="entry-actions">
-          <button class="ghost-button" onclick="showMonthSection('income')">Back to Income</button>
-          <button onclick="addSparkShift()">Add Spark Shift</button>
-        </div>
-        <div id="sparkArea"></div>
-      </section>
-
       <section id="monthSection-assignment" class="month-section hidden">
         <h4>Monthly Money Assignment</h4>
         <p>Left to Assign: <span id="leftToAssign">$0</span></p>
@@ -512,12 +588,20 @@ function renderMonthView() {
 
 function showWeek(index) {
   activeWeeklyIndex = index;
+  updateWeekNavigation();
   renderWeeklyTracker();
 }
 
 function showWeeklyOverview() {
   activeWeeklyIndex = -1;
+  updateWeekNavigation();
   renderWeeklyTracker();
+}
+
+function updateWeekNavigation() {
+  document.querySelectorAll(".week-nav-buttons .week-button").forEach((button, index) => {
+    button.classList.toggle("active", index === activeWeeklyIndex + 1);
+  });
 }
 
 function showMonthSection(name) {
@@ -539,7 +623,6 @@ function renderMonthSections() {
   renderBillsSection();
   renderGoalsSection();
   renderCarFundSection();
-  renderSparkSection();
   renderAssignmentSection();
   renderNotesSection();
 }
@@ -556,20 +639,21 @@ function renderWeeklyTracker() {
     activeWeeklyIndex = -1;
   }
   const selectedWeek = activeWeeklyIndex >= 0 ? weeks[activeWeeklyIndex] : null;
-  const incomeTotal = getWeeklyIncomeTotal(month);
-  const billsTotal = getWeeklyBillsTotal(month);
-  const savingsTotal = getWeeklySavingsTotal(month);
-  const expensesTotal = getWeeklyExpensesTotal(month);
+  const incomeTotal = selectedWeek ? getWeekIncomeTotal(month, selectedWeek) : getWeeklyIncomeTotal(month);
+  const billsTotal = selectedWeek ? getWeekBillsTotal(selectedWeek) : getWeeklyBillsTotal(month);
+  const savingsTotal = selectedWeek ? getWeekSavingsTotal(selectedWeek) : getWeeklySavingsTotal(month);
+  const expensesTotal = selectedWeek ? getWeekExpensesTotal(selectedWeek) : getWeeklyExpensesTotal(month);
+  const summaryLabel = selectedWeek ? "Weekly" : "Weekly Tracker";
 
   container.innerHTML = `
     <div class="report-card">
       <h4>${activeWeeklyIndex < 0 ? "Monthly Overview" : selectedWeek.name}</h4>
-      ${activeWeeklyIndex >= 0 && selectedWeek ? `<p class="spark-note">${selectedWeek.startDate} to ${selectedWeek.endDate}</p>` : ""}
+      ${activeWeeklyIndex >= 0 && selectedWeek ? `<p class="spark-note">${formatDisplayDate(selectedWeek.startDate)} to ${formatDisplayDate(selectedWeek.endDate)}</p>` : ""}
       <div class="dashboard-cards">
-        <div class="card"><h4>Weekly Income</h4><p>${formatCurrency(incomeTotal)}</p></div>
-        <div class="card"><h4>Weekly Bills</h4><p>${formatCurrency(billsTotal)}</p></div>
-        <div class="card"><h4>Weekly Savings</h4><p>${formatCurrency(savingsTotal)}</p></div>
-        <div class="card"><h4>Weekly Expenses</h4><p>${formatCurrency(expensesTotal)}</p></div>
+        <div class="card"><h4>${summaryLabel} Income</h4><p>${formatCurrency(incomeTotal)}</p></div>
+        <div class="card"><h4>${summaryLabel} Bills</h4><p>${formatCurrency(billsTotal)}</p></div>
+        <div class="card"><h4>${summaryLabel} Savings</h4><p>${formatCurrency(savingsTotal)}</p></div>
+        <div class="card"><h4>${summaryLabel} Expenses</h4><p>${formatCurrency(expensesTotal)}</p></div>
       </div>
 
       ${activeWeeklyIndex < 0 ? `
@@ -584,7 +668,7 @@ function renderWeeklyTracker() {
           <div class="entry-card">
             <h4>Income</h4>
             <div class="entry-fields">
-              <label>Home Health
+              <label>Main Job
                 <input type="number" min="0" step="0.01" value="${escapeHtml(selectedWeek.homeHealthIncome || "")}" onchange="updateWeeklyIncomeCategory('homeHealthIncome', this.value)" />
               </label>
               <label>Child Support
@@ -594,7 +678,7 @@ function renderWeeklyTracker() {
                 <div class="spark-note">${formatCurrency(getWeeklySparkIncome(month, selectedWeek))} from Spark tracker</div>
               </label>
             </div>
-            <p class="spark-note">Home Health and Child Support are editable here. Spark is pulled from your Spark tracker entries for this week.</p>
+            <p class="spark-note">Main Job and Child Support are editable here. Spark is pulled from your Spark tracker entries for this week.</p>
           </div>
 
           <div class="entry-card">
@@ -855,7 +939,7 @@ function renderIncomeSection() {
           </label>
         </div>
         <div class="entry-actions">
-          ${isSparkSource ? `<button class="ghost-button" onclick="showMonthSection('spark')">Open Spark Tracker</button>` : ""}
+          ${isSparkSource ? `<button class="ghost-button" onclick="showPage('sparkTracker')">Open Spark Tracker</button>` : ""}
           <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
         </div>
       </div>
@@ -907,7 +991,9 @@ function renderGoalsSection() {
   }
 
   container.innerHTML = month.goals.map((goal, index) => {
-    const progress = getGoalProgress(goal);
+    const contributionAmount = getWeeklyGoalContributionTotal(month, goal.name);
+    const totalSaved = getGoalCurrentAmount(month, goal);
+    const progress = getGoalProgressForMonth(month, goal);
     const colors = ["#d81b6b", "#7c3aed", "#0f766e", "#2563eb", "#f59e0b", "#dc2626", "#0891b2"];
     const barColor = colors[index % colors.length];
     return `
@@ -922,8 +1008,8 @@ function renderGoalsSection() {
           <label>Current Amount
             <input type="number" min="0" step="0.01" value="${escapeHtml(goal.currentAmount || "")}" onchange="updateGoalField(${index}, 'currentAmount', this.value)" />
           </label>
-          <label>Amount Added
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.addedAmount || "")}" onchange="updateGoalField(${index}, 'addedAmount', this.value)" />
+          <label>Added from Weekly Contributions
+            <input type="number" value="${escapeHtml(contributionAmount || "")}" readonly />
           </label>
           <label>Notes
             <textarea onchange="updateGoalField(${index}, 'notes', this.value)">${escapeHtml(goal.notes || "")}</textarea>
@@ -931,7 +1017,7 @@ function renderGoalsSection() {
         </div>
         <div class="progress-block">
           <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
-          <p>${progress}% complete</p>
+          <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
         </div>
         <button class="ghost-button" onclick="removeGoal(${index})">Remove</button>
       </div>
@@ -984,6 +1070,74 @@ function renderCarFundSection() {
   `;
 }
 
+function renderSparkTrackerPage() {
+  const container = document.getElementById("sparkTrackerArea");
+  const cycle = getActiveCycle();
+  const month = getSelectedMonthData();
+  if (!container || !cycle || !month) {
+    return;
+  }
+
+  container.innerHTML = `
+    <h2>Spark Tracker</h2>
+    <p>Choose the month, then add each shift. A shift's accepted date automatically counts its earnings in the matching budget week.</p>
+
+    <div class="month-buttons">
+      ${cycle.months.map((cycleMonth) => `
+        <button class="${cycleMonth.name === activeMonthName ? "active" : ""}" onclick="openSparkMonth('${cycleMonth.name}')">${cycleMonth.name}</button>
+      `).join("")}
+    </div>
+
+    <h3>${month.name} ${month.year}</h3>
+    <p>Spark Earnings This Month: <span id="sparkMonthTotal">$0</span></p>
+
+    <div class="month-tab-buttons">
+      <button data-spark-section="shifts" class="${activeSparkSection === "shifts" ? "active" : ""}" onclick="showSparkTrackerTab('shifts')">Shifts</button>
+      <button data-spark-section="tips" class="${activeSparkSection === "tips" ? "active" : ""}" onclick="showSparkTrackerTab('tips')">Tips</button>
+    </div>
+
+    <div id="sparkShiftActions" class="entry-actions">
+      <button onclick="addSparkShift()">Add Spark Shift</button>
+    </div>
+    <div id="sparkArea"></div>
+  `;
+
+  renderSparkSection();
+}
+
+function openSparkMonth(monthName) {
+  activeMonthName = monthName;
+  activeWeeklyIndex = -1;
+  plannerState.lastOpenedMonth = monthName;
+  saveState();
+  renderMonthButtons();
+  renderMonthView();
+  renderSparkTrackerPage();
+  renderDashboard();
+  renderReports();
+}
+
+function showSparkTrackerTab(section) {
+  activeSparkSection = section;
+  updateSparkTrackerTabUi();
+}
+
+function updateSparkTrackerTabUi() {
+  document.querySelectorAll(".month-tab-buttons [data-spark-section]").forEach((button) => {
+    button.classList.toggle("active", button.getAttribute("data-spark-section") === activeSparkSection);
+  });
+
+  const shiftActions = document.getElementById("sparkShiftActions");
+  if (shiftActions) {
+    shiftActions.classList.toggle("hidden", activeSparkSection !== "shifts");
+  }
+
+  document.querySelectorAll("#sparkArea > *").forEach((element) => {
+    const isTipsPanel = element.classList.contains("spark-tips-panel");
+    element.classList.toggle("hidden", activeSparkSection === "tips" ? !isTipsPanel : isTipsPanel);
+  });
+}
+
 function renderSparkSection() {
   const month = getSelectedMonthData();
   const container = document.getElementById("sparkArea");
@@ -1019,7 +1173,7 @@ function renderSparkSection() {
       </div>
     </div>
 
-    <div class="report-card">
+    <div class="report-card spark-tips-panel">
       <h4>Spark Tip Tracker</h4>
       <div class="dashboard-cards">
         <div class="card"><h4>Pending Tips</h4><p>${formatCurrency(summary.pendingTips)}</p></div>
@@ -1150,6 +1304,8 @@ function renderSparkSection() {
       </div>
     `).join("")}
   `;
+
+  updateSparkTrackerTabUi();
 }
 
 function renderAssignmentSection() {
@@ -1213,7 +1369,7 @@ function renderDashboard() {
   if (dashboardBills) dashboardBills.textContent = formatCurrency(getMonthlyBills(month));
   if (dashboardSavings) dashboardSavings.textContent = formatCurrency(getMonthlySavings(month));
   if (dashboardRemaining) dashboardRemaining.textContent = formatCurrency(getRemainingAmount(month));
-  if (homeHealthIncome) homeHealthIncome.textContent = formatCurrency(getSourceIncome(month, "Home Health"));
+  if (homeHealthIncome) homeHealthIncome.textContent = formatCurrency(getSourceIncome(month, "Main Job"));
   if (sparkIncome) sparkIncome.textContent = formatCurrency(getSourceIncome(month, "Walmart/Spark"));
   if (childSupportIncome) childSupportIncome.textContent = formatCurrency(getSourceIncome(month, "Child Support"));
 
@@ -1222,9 +1378,9 @@ function renderDashboard() {
       <div class="goal-row">
         <div class="goal-labels">
           <span>${escapeHtml(goal.name || "Goal")}</span>
-          <span>${getGoalProgress(goal)}%</span>
+          <span>${getGoalProgressForMonth(month, goal)}%</span>
         </div>
-        <div class="progress-bar"><span style="width:${getGoalProgress(goal)}%"></span></div>
+        <div class="progress-bar"><span style="width:${getGoalProgressForMonth(month, goal)}%"></span></div>
       </div>
     `).join("");
   }
@@ -1699,7 +1855,7 @@ function getAssignmentSpend(month) {
 }
 
 function getRemainingAmount(month) {
-  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month);
+  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month) - getWeeklyExpensesTotal(month);
 }
 
 function getGoalProgress(goal) {
@@ -1712,12 +1868,14 @@ function getGoalProgress(goal) {
 
 function getGoalProgressForMonth(month, goal) {
   const target = Number(goal.targetAmount) || 0;
-  const weeklyContribution = getWeeklyGoalContributionTotal(month, goal.name);
   if (!target) {
     return 0;
   }
-  const currentAmount = weeklyContribution || (Number(goal.currentAmount) || 0);
-  return Math.min(100, Math.round(currentAmount / target * 100));
+  return Math.min(100, Math.round(getGoalCurrentAmount(month, goal) / target * 100));
+}
+
+function getGoalCurrentAmount(month, goal) {
+  return (Number(goal.currentAmount) || 0) + getWeeklyGoalContributionTotal(month, goal.name);
 }
 
 function getGoalProgressValue(month) {
@@ -1728,11 +1886,7 @@ function getGoalProgressValue(month) {
 }
 
 function getGoalsAmount(month) {
-  const weeklyGoals = ensureWeekData(month).reduce((sum, week) => sum + week.goals.reduce((weekSum, entry) => weekSum + (Number(entry.amount) || 0), 0), 0);
-  if (weeklyGoals || hasWeeklySavingsEntries(month)) {
-    return weeklyGoals;
-  }
-  return month.goals.reduce((sum, goal) => sum + (Number(goal.currentAmount) || 0), 0);
+  return month.goals.reduce((sum, goal) => sum + getGoalCurrentAmount(month, goal), 0);
 }
 
 function getCarFundTotal(month) {
@@ -1743,7 +1897,7 @@ function getHealthScore(month) {
   const paidBills = month.bills.filter((bill) => bill.paid).length;
   const paidRatio = month.bills.length ? paidBills / month.bills.length : 0;
   const savingsRatio = getMonthlyIncome(month) > 0 ? Math.min(1, getMonthlySavings(month) / getMonthlyIncome(month)) : 0;
-  const goalsRatio = month.goals.length ? month.goals.filter((goal) => getGoalProgress(goal) >= 100).length / month.goals.length : 0;
+  const goalsRatio = month.goals.length ? month.goals.filter((goal) => getGoalProgressForMonth(month, goal) >= 100).length / month.goals.length : 0;
   const remainingRatio = getRemainingAmount(month) >= 0 ? 1 : 0;
   const score = Math.round((paidRatio * 0.3 + savingsRatio * 0.25 + goalsRatio * 0.25 + remainingRatio * 0.2) * 100);
   return Math.max(0, Math.min(100, score));
@@ -1891,6 +2045,8 @@ function escapeHtml(value) {
 window.showPage = showPage;
 window.openMonth = openMonth;
 window.showMonthSection = showMonthSection;
+window.openSparkMonth = openSparkMonth;
+window.showSparkTrackerTab = showSparkTrackerTab;
 window.addIncomeRow = addIncomeRow;
 window.updateIncomeField = updateIncomeField;
 window.removeIncomeRow = removeIncomeRow;

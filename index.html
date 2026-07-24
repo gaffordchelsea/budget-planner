@@ -16,6 +16,7 @@
 <nav class="main-navigation">
   <button data-page="dashboard" onclick="showPage('dashboard')">Dashboard</button>
   <button data-page="budgetCycle" onclick="showPage('budgetCycle')">Budget Cycle</button>
+  <button data-page="sparkTracker" onclick="showPage('sparkTracker')">Spark Tracker</button>
   <button data-page="history" onclick="showPage('history')">History</button>
   <button data-page="reports" onclick="showPage('reports')">Reports</button>
   <button data-page="settings" onclick="showPage('settings')">Settings</button>
@@ -51,7 +52,7 @@
     <h3>Income Breakdown</h3>
     <div class="income-cards">
       <div class="card">
-        <h4>Home Health</h4>
+        <h4>Main Job</h4>
         <p id="homeHealthIncome">$0</p>
       </div>
       <div class="card">
@@ -82,6 +83,13 @@
     <div id="monthButtons" class="month-buttons"></div>
 
     <div id="monthArea"></div>
+  </section>
+
+  <!-- =========================
+       SPARK TRACKER
+       ========================= -->
+  <section id="sparkTracker" class="page hidden">
+    <div id="sparkTrackerArea"></div>
   </section>
 
   <!-- =========================
