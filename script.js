@@ -6,6 +6,14 @@
    =================================================================== */
 
 const STORAGE_KEY = "budgetPlannerStateV1";
+const THEME_STORAGE_KEY = "budgetPlannerThemeV1";
+const DEFAULT_ACCENT_COLOR = "#d81b6b";
+const DEFAULT_BACKGROUND_COLOR = "#ffffff";
+const DEFAULT_PATTERN_COLOR = "#ff5fbf";
+const DEFAULT_PANEL_COLOR = "#ffffff";
+const DEFAULT_TAB_COLOR = "#ffffff";
+const DEFAULT_BACKGROUND_STYLE = "checkered";
+const DEFAULT_CARD_OPACITY = 0.6;
 const DEFAULT_SPENDING_CATEGORIES = [
   "Gas",
   "Groceries",
@@ -17,6 +25,23 @@ const DEFAULT_SPENDING_CATEGORIES = [
   "Other"
 ];
 
+/* ===================================================================
+   Firebase setup. Each signed-in user gets their own document at
+   users/{uid} in Firestore holding { plannerState, themePrefs } —
+   this is what makes accounts private and synced across devices.
+   =================================================================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyDRV1q0VikSg9YRgEnR5KLRygLH6Qk6zAY",
+  authDomain: "budget-planner-fcc3c.firebaseapp.com",
+  projectId: "budget-planner-fcc3c",
+  storageBucket: "budget-planner-fcc3c.firebasestorage.app",
+  messagingSenderId: "609210922234",
+  appId: "1:609210922234:web:cd2fdf2c1d1b1a51684543"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
 let plannerState = null;
 let activeCycleId = null;
 let activeMonthName = null;
@@ -25,38 +50,412 @@ let activeWeeklyIndex = -1;
 let activeSparkOrderIndex = -1;
 let activeSparkSection = "shifts";
 
-function initializePlanner() {
-  plannerState = loadState();
-  if (!plannerState) {
+let currentUserId = null;
+let themePrefs = {
+  mode: "light",
+  accent: DEFAULT_ACCENT_COLOR,
+  backgroundStyle: DEFAULT_BACKGROUND_STYLE,
+  background: DEFAULT_BACKGROUND_COLOR,
+  pattern: DEFAULT_PATTERN_COLOR,
+  panelColor: DEFAULT_BACKGROUND_COLOR,
+  tabColor: DEFAULT_BACKGROUND_COLOR,
+  cardOpacity: DEFAULT_CARD_OPACITY
+};
+let saveStateTimeout = null;
+let saveThemeTimeout = null;
+
+function initializeAuth() {
+  bindImportListener();
+  bindBackToTop();
+  showWelcomePage();
+  auth.onAuthStateChanged((user) => {
+    if (user) {
+      startAppForUser(user);
+    } else {
+      stopAppForSignedOutUser();
+    }
+  });
+}
+
+function openAuthPage() {
+  document.getElementById("authGate").classList.remove("hidden");
+  document.getElementById("authSubmitButton").textContent = "Continue";
+}
+
+function showWelcomePage() {
+  document.getElementById("authGate").classList.add("hidden");
+}
+
+function getUserDocRef() {
+  return db.collection("users").doc(currentUserId);
+}
+
+async function startAppForUser(user) {
+  currentUserId = user.uid;
+  document.getElementById("authGate").classList.add("hidden");
+  document.getElementById("welcomePage").classList.add("hidden");
+  document.getElementById("appShell").classList.remove("hidden");
+  document.getElementById("signOutBottom").classList.remove("hidden");
+  const emailDisplay = document.getElementById("userEmailDisplay");
+  if (emailDisplay) {
+    emailDisplay.textContent = user.email || "";
+  }
+
+  try {
+    const docSnap = await getUserDocRef().get();
+    const data = docSnap.exists ? docSnap.data() : null;
+
+    if (data && data.plannerState) {
+      plannerState = normalizeState(data.plannerState);
+      themePrefs = data.themePrefs || { mode: "light", accent: DEFAULT_ACCENT_COLOR };
+    } else {
+      // New account: pull in any budget already sitting in this browser's
+      // local storage from before accounts existed, so nothing is lost.
+      const legacyState = loadLegacyLocalState();
+      plannerState = legacyState ? normalizeState(legacyState) : buildDefaultState();
+      themePrefs = loadLegacyThemePrefs();
+      await getUserDocRef().set({ plannerState, themePrefs }, { merge: true });
+    }
+  } catch (error) {
+    console.error("Failed to load budget data", error);
     plannerState = buildDefaultState();
-  } else {
-    plannerState = normalizeState(plannerState);
   }
 
   ensureActiveCycle();
   activeCycleId = plannerState.currentCycleId;
   activeMonthName = plannerState.lastOpenedMonth || getCurrentMonthName();
 
-  bindImportListener();
+  applyTheme();
   renderApp();
 }
 
-function loadState() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return null;
+function stopAppForSignedOutUser() {
+  currentUserId = null;
+  plannerState = null;
+  document.getElementById("appShell").classList.add("hidden");
+  document.getElementById("signOutBottom").classList.add("hidden");
+  document.getElementById("authGate").classList.add("hidden");
+  document.getElementById("welcomePage").classList.remove("hidden");
+  const form = document.getElementById("authForm");
+  if (form) {
+    form.reset();
   }
+  clearAuthError();
+  clearAuthStatus();
+}
 
+function loadLegacyLocalState() {
   try {
-    return JSON.parse(raw);
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
   } catch (error) {
-    console.error("Failed to parse planner state", error);
     return null;
   }
 }
 
+function loadLegacyThemePrefs() {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    if (!raw) {
+      return {
+        mode: "light",
+        accent: DEFAULT_ACCENT_COLOR,
+        backgroundStyle: DEFAULT_BACKGROUND_STYLE,
+        background: DEFAULT_BACKGROUND_COLOR,
+        pattern: DEFAULT_PATTERN_COLOR
+      };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      mode: parsed.mode === "dark" ? "dark" : "light",
+      accent: parsed.accent || DEFAULT_ACCENT_COLOR,
+      backgroundStyle: ["checkered", "solid", "gradient", "stripes", "dots", "waves", "sunburst", "grid"].includes(parsed.backgroundStyle)
+        ? parsed.backgroundStyle
+        : DEFAULT_BACKGROUND_STYLE,
+      background: parsed.background || DEFAULT_BACKGROUND_COLOR,
+      pattern: parsed.pattern || DEFAULT_PATTERN_COLOR,
+      panelColor: parsed.panelColor || DEFAULT_PANEL_COLOR,
+      tabColor: parsed.tabColor || DEFAULT_TAB_COLOR,
+      cardOpacity: typeof parsed.cardOpacity === "number" ? parsed.cardOpacity : DEFAULT_CARD_OPACITY
+    };
+  } catch (error) {
+    return {
+      mode: "light",
+      accent: DEFAULT_ACCENT_COLOR,
+      backgroundStyle: DEFAULT_BACKGROUND_STYLE,
+      background: DEFAULT_BACKGROUND_COLOR,
+      pattern: DEFAULT_PATTERN_COLOR,
+      panelColor: DEFAULT_PANEL_COLOR,
+      tabColor: DEFAULT_TAB_COLOR,
+      cardOpacity: DEFAULT_CARD_OPACITY
+    };
+  }
+}
+
+function handleAuthSubmit(event) {
+  event.preventDefault();
+  const email = document.getElementById("authEmail").value.trim();
+  const password = document.getElementById("authPassword").value;
+
+  clearAuthError();
+  setAuthStatus("Signing in...");
+
+  auth.signInWithEmailAndPassword(email, password)
+    .then(() => {
+      clearAuthStatus();
+    })
+    .catch((error) => {
+      if (error.code === "auth/user-not-found") {
+        setAuthStatus("No account found. Creating one now...");
+        auth.createUserWithEmailAndPassword(email, password)
+          .then(() => {
+            clearAuthStatus();
+          })
+          .catch((createError) => {
+            clearAuthStatus();
+            setAuthError(friendlyAuthError(createError));
+          });
+      } else {
+        clearAuthStatus();
+        setAuthError(friendlyAuthError(error));
+      }
+    });
+}
+
+function handleSignOut() {
+  auth.signOut();
+}
+
+function friendlyAuthError(error) {
+  const messages = {
+    "auth/email-already-in-use": "That email already has an account — try Sign In instead.",
+    "auth/invalid-email": "That email address doesn't look right.",
+    "auth/weak-password": "Password should be at least 6 characters.",
+    "auth/wrong-password": "Incorrect email or password.",
+    "auth/user-not-found": "No account found with that email.",
+    "auth/invalid-credential": "Incorrect email or password.",
+    "auth/too-many-requests": "Too many attempts — please wait a bit and try again."
+  };
+  return messages[error.code] || error.message;
+}
+
+function setAuthError(message) {
+  const el = document.getElementById("authError");
+  if (el) {
+    el.textContent = message;
+    el.classList.remove("hidden");
+  }
+}
+
+function clearAuthError() {
+  const el = document.getElementById("authError");
+  if (el) {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
+}
+
+function setAuthStatus(message) {
+  const el = document.getElementById("authStatus");
+  if (el) {
+    el.textContent = message;
+    el.classList.remove("hidden");
+  }
+}
+
+function clearAuthStatus() {
+  const el = document.getElementById("authStatus");
+  if (el) {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
+}
+
+/* ===================================================================
+   Appearance (theme mode + accent color)
+   =================================================================== */
+function hexToRgbString(hex) {
+  const clean = hex.replace("#", "");
+  const bigint = parseInt(clean.length === 3
+    ? clean.split("").map((c) => c + c).join("")
+    : clean, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `${r}, ${g}, ${b}`;
+}
+
+function applyTheme() {
+  document.body.classList.toggle("theme-dark", themePrefs.mode === "dark");
+  document.documentElement.style.setProperty("--color-accent", themePrefs.accent);
+  document.documentElement.style.setProperty("--color-accent-rgb", hexToRgbString(themePrefs.accent));
+  document.documentElement.style.setProperty("--color-bg", themePrefs.background);
+  document.documentElement.style.setProperty("--color-bg-pattern", themePrefs.pattern);
+  document.documentElement.style.setProperty("--panel-bg", themePrefs.panelColor);
+  document.documentElement.style.setProperty("--panel-bg-rgb", hexToRgbString(themePrefs.panelColor));
+  document.documentElement.style.setProperty("--panel-text", getContrastColor(themePrefs.panelColor));
+  document.documentElement.style.setProperty("--tab-bg", themePrefs.tabColor);
+  document.documentElement.style.setProperty("--tab-bg-rgb", hexToRgbString(themePrefs.tabColor));
+  document.documentElement.style.setProperty("--tab-text", getContrastColor(themePrefs.tabColor));
+  document.documentElement.style.setProperty("--tab-active-text", getContrastColor(themePrefs.accent));
+  document.documentElement.style.setProperty("--card-opacity", themePrefs.cardOpacity);
+  document.body.setAttribute("data-background-style", themePrefs.backgroundStyle || DEFAULT_BACKGROUND_STYLE);
+
+  const modeSelect = document.getElementById("themeModeSelect");
+  if (modeSelect) {
+    modeSelect.value = themePrefs.mode;
+  }
+  const accentPicker = document.getElementById("accentColorPicker");
+  if (accentPicker) {
+    accentPicker.value = themePrefs.accent;
+  }
+  const backgroundStyleSelect = document.getElementById("backgroundStyleSelect");
+  if (backgroundStyleSelect) {
+    backgroundStyleSelect.value = themePrefs.backgroundStyle;
+  }
+  const backgroundColorPicker = document.getElementById("backgroundColorPicker");
+  if (backgroundColorPicker) {
+    backgroundColorPicker.value = themePrefs.background;
+  }
+  const patternColorPicker = document.getElementById("patternColorPicker");
+  if (patternColorPicker) {
+    patternColorPicker.value = themePrefs.pattern;
+  }
+  const panelColorPicker = document.getElementById("panelColorPicker");
+  if (panelColorPicker) {
+    panelColorPicker.value = themePrefs.panelColor;
+  }
+  const tabColorPicker = document.getElementById("tabColorPicker");
+  if (tabColorPicker) {
+    tabColorPicker.value = themePrefs.tabColor;
+  }
+  const cardOpacityRange = document.getElementById("cardOpacityRange");
+  if (cardOpacityRange) {
+    cardOpacityRange.value = Math.round((themePrefs.cardOpacity || DEFAULT_CARD_OPACITY) * 100);
+  }
+  const cardOpacityValue = document.getElementById("cardOpacityValue");
+  if (cardOpacityValue) {
+    cardOpacityValue.textContent = `${Math.round((themePrefs.cardOpacity || DEFAULT_CARD_OPACITY) * 100)}%`;
+  }
+}
+
+function queueThemeSave() {
+  if (!currentUserId) {
+    return;
+  }
+  clearTimeout(saveThemeTimeout);
+  saveThemeTimeout = setTimeout(() => {
+    getUserDocRef().set({ themePrefs }, { merge: true }).catch((error) => {
+      console.error("Failed to save theme", error);
+    });
+  }, 500);
+}
+
+function setThemeMode(mode) {
+  themePrefs.mode = mode === "dark" ? "dark" : "light";
+  applyTheme();
+  queueThemeSave();
+}
+
+function setAccentColor(color) {
+  themePrefs.accent = color;
+  applyTheme();
+  queueThemeSave();
+}
+
+function setBackgroundStyle(style) {
+  themePrefs.backgroundStyle = ["checkered", "solid", "gradient", "stripes", "dots", "waves", "sunburst", "grid"].includes(style)
+    ? style
+    : DEFAULT_BACKGROUND_STYLE;
+  applyTheme();
+  queueThemeSave();
+}
+
+function setBackgroundColor(color) {
+  themePrefs.background = color;
+  applyTheme();
+  queueThemeSave();
+}
+
+function getContrastColor(hex) {
+  const clean = hex.replace("#", "");
+  const normalized = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
+  const bigint = parseInt(normalized, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luminance > 0.55 ? "#000000" : "#ffffff";
+}
+
+function setPatternColor(color) {
+  themePrefs.pattern = color;
+  applyTheme();
+  queueThemeSave();
+}
+
+function setPanelColor(color) {
+  themePrefs.panelColor = color;
+  applyTheme();
+  queueThemeSave();
+}
+
+function setTabColor(color) {
+  themePrefs.tabColor = color;
+  applyTheme();
+  queueThemeSave();
+}
+
+function setCardOpacity(value) {
+  const opacity = Math.min(0.95, Math.max(0.3, Number(value) / 100));
+  themePrefs.cardOpacity = opacity;
+  applyTheme();
+  queueThemeSave();
+}
+
+function resetTheme() {
+  themePrefs = {
+    mode: "light",
+    accent: DEFAULT_ACCENT_COLOR,
+    backgroundStyle: DEFAULT_BACKGROUND_STYLE,
+    background: DEFAULT_BACKGROUND_COLOR,
+    pattern: DEFAULT_PATTERN_COLOR,
+    panelColor: DEFAULT_PANEL_COLOR,
+    tabColor: DEFAULT_TAB_COLOR,
+    cardOpacity: DEFAULT_CARD_OPACITY
+  };
+  applyTheme();
+  queueThemeSave();
+}
+
+/* ===================================================================
+   Back to top button
+   =================================================================== */
+function bindBackToTop() {
+  const button = document.getElementById("backToTopBtn");
+  if (!button) {
+    return;
+  }
+  window.addEventListener("scroll", () => {
+    const shouldShow = window.scrollY > 320;
+    button.classList.toggle("hidden", !shouldShow);
+  });
+}
+
+function scrollToTop() {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(plannerState));
+  if (!currentUserId) {
+    return;
+  }
+  clearTimeout(saveStateTimeout);
+  saveStateTimeout = setTimeout(() => {
+    getUserDocRef().set({ plannerState }, { merge: true }).catch((error) => {
+      console.error("Failed to save budget data", error);
+    });
+  }, 500);
 }
 
 function buildDefaultState() {
@@ -638,17 +1037,23 @@ function renderWeeklyTracker() {
   if (activeWeeklyIndex < 0 || activeWeeklyIndex >= weeks.length) {
     activeWeeklyIndex = -1;
   }
-  const selectedWeek = activeWeeklyIndex >= 0 ? weeks[activeWeeklyIndex] : null;
-  const incomeTotal = selectedWeek ? getWeekIncomeTotal(month, selectedWeek) : getWeeklyIncomeTotal(month);
-  const billsTotal = selectedWeek ? getWeekBillsTotal(selectedWeek) : getWeeklyBillsTotal(month);
-  const savingsTotal = selectedWeek ? getWeekSavingsTotal(selectedWeek) : getWeeklySavingsTotal(month);
-  const expensesTotal = selectedWeek ? getWeekExpensesTotal(selectedWeek) : getWeeklyExpensesTotal(month);
-  const summaryLabel = selectedWeek ? "Weekly" : "Weekly Tracker";
+
+  if (activeWeeklyIndex < 0) {
+    container.innerHTML = "";
+    return;
+  }
+
+  const selectedWeek = weeks[activeWeeklyIndex];
+  const incomeTotal = getWeekIncomeTotal(month, selectedWeek);
+  const billsTotal = getWeekBillsTotal(selectedWeek);
+  const savingsTotal = getWeekSavingsTotal(selectedWeek);
+  const expensesTotal = getWeekExpensesTotal(selectedWeek);
+  const summaryLabel = "Weekly";
 
   container.innerHTML = `
     <div class="report-card">
-      <h4>${activeWeeklyIndex < 0 ? "Monthly Overview" : selectedWeek.name}</h4>
-      ${activeWeeklyIndex >= 0 && selectedWeek ? `<p class="spark-note">${formatDisplayDate(selectedWeek.startDate)} to ${formatDisplayDate(selectedWeek.endDate)}</p>` : ""}
+      <h4>${selectedWeek.name}</h4>
+      <p class="spark-note">${formatDisplayDate(selectedWeek.startDate)} to ${formatDisplayDate(selectedWeek.endDate)}</p>
       <div class="dashboard-cards">
         <div class="card"><h4>${summaryLabel} Income</h4><p>${formatCurrency(incomeTotal)}</p></div>
         <div class="card"><h4>${summaryLabel} Bills</h4><p>${formatCurrency(billsTotal)}</p></div>
@@ -656,31 +1061,51 @@ function renderWeeklyTracker() {
         <div class="card"><h4>${summaryLabel} Expenses</h4><p>${formatCurrency(expensesTotal)}</p></div>
       </div>
 
-      ${activeWeeklyIndex < 0 ? `
         <div class="dashboard-cards">
-          <div class="card"><h4>Monthly Income</h4><p>${formatCurrency(getMonthlyIncome(month))}</p></div>
-          <div class="card"><h4>Monthly Bills</h4><p>${formatCurrency(getMonthlyBills(month))}</p></div>
-          <div class="card"><h4>Monthly Savings</h4><p>${formatCurrency(getMonthlySavings(month))}</p></div>
-          <div class="card"><h4>Remaining</h4><p>${formatCurrency(getRemainingAmount(month))}</p></div>
+          <div class="card"><h4>Main Job</h4><p>${formatCurrency(Number(selectedWeek.homeHealthIncome) || 0)}</p></div>
+          <div class="card"><h4>Child Support</h4><p>${formatCurrency(Number(selectedWeek.childSupportIncome) || 0)}</p></div>
+          <div class="card"><h4>Spark</h4><p>${formatCurrency(getWeeklySparkIncome(month, selectedWeek))}</p></div>
+          <div class="card"><h4>Total Income</h4><p>${formatCurrency(getWeekIncomeTotal(month, selectedWeek))}</p></div>
         </div>
-      ` : `
         <div class="week-detail-grid">
           <div class="entry-card">
-            <h4>Income</h4>
-            <div class="entry-fields">
-              <label>Main Job
-                <input type="number" min="0" step="0.01" value="${escapeHtml(selectedWeek.homeHealthIncome || "")}" onchange="updateWeeklyIncomeCategory('homeHealthIncome', this.value)" />
-              </label>
-              <label>Child Support
-                <input type="number" min="0" step="0.01" value="${escapeHtml(selectedWeek.childSupportIncome || "")}" onchange="updateWeeklyIncomeCategory('childSupportIncome', this.value)" />
-              </label>
-              <label>Spark
-                <div class="spark-note">${formatCurrency(getWeeklySparkIncome(month, selectedWeek))} from Spark tracker</div>
-              </label>
-            </div>
-            <p class="spark-note">Main Job and Child Support are editable here. Spark is pulled from your Spark tracker entries for this week.</p>
+            <h4>Monthly Income Entries</h4>
+            ${month.income.map((entry, index) => {
+              const isSparkSource = /spark/i.test(entry.source || "");
+              const displayAmount = isSparkSource ? getSparkSummary(month).totalEarnings : Number(entry.amount) || 0;
+              if (isSparkSource) {
+                return `
+                  <div class="entry-fields">
+                    <label>Source
+                      <input type="text" value="Spark" disabled />
+                    </label>
+                    <label>Amount
+                      <input type="text" value="${escapeHtml(formatCurrency(displayAmount || 0))}" readonly />
+                    </label>
+                  </div>
+                  <p class="spark-note">Spark income is calculated from the Spark Tracker and cannot be edited here.</p>
+                `;
+              }
+              return `
+                <div class="entry-fields">
+                  <label>Source
+                    <input type="text" value="${escapeHtml(entry.source || "")}" onchange="updateIncomeField(${index}, 'source', this.value)" />
+                  </label>
+                  <label>Date
+                    <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
+                  </label>
+                  <label>Amount
+                    <input type="text" value="${escapeHtml(formatCurrency(displayAmount || 0))}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
+                  </label>
+                  <label>Notes
+                    <textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
+                  </label>
+                </div>
+                <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
+              `;
+            }).join("")}
+            <button onclick="addIncomeRow()">Add Income</button>
           </div>
-
           <div class="entry-card">
             <h4>Bills</h4>
             ${selectedWeek.bills.map((entry, index) => `
@@ -703,7 +1128,6 @@ function renderWeeklyTracker() {
             `).join("")}
             <button onclick="addWeeklyBillEntry()">Add Bill</button>
           </div>
-
           <div class="entry-card">
             <h4>Savings</h4>
             ${selectedWeek.savingsDeposits.map((entry, index) => `
@@ -722,7 +1146,6 @@ function renderWeeklyTracker() {
             `).join("")}
             <button onclick="addWeeklySavingsEntry()">Add Deposit</button>
           </div>
-
           <div class="entry-card">
             <h4>Goals</h4>
             ${selectedWeek.goals.map((entry, index) => `
@@ -741,7 +1164,6 @@ function renderWeeklyTracker() {
             `).join("")}
             <button onclick="addWeeklyGoalEntry()">Add Goal Contribution</button>
           </div>
-
           <div class="entry-card">
             <h4>Expenses</h4>
             ${selectedWeek.expenses.map((entry, index) => `
@@ -760,13 +1182,11 @@ function renderWeeklyTracker() {
             `).join("")}
             <button onclick="addWeeklyExpenseEntry()">Add Expense</button>
           </div>
-
           <div class="entry-card">
             <h4>Notes</h4>
             <textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>
           </div>
         </div>
-      `}
     </div>
   `;
 }
@@ -920,31 +1340,26 @@ function renderIncomeSection() {
     return;
   }
 
-  container.innerHTML = month.income.map((entry, index) => {
-    const isSparkSource = /spark/i.test(entry.source || "");
-    return `
-      <div class="entry-card">
-        <div class="entry-fields">
-          <label>Source
-            <input type="text" value="${escapeHtml(entry.source || "")}" onchange="updateIncomeField(${index}, 'source', this.value)" />
-          </label>
-          <label>Date
-            <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
-          </label>
-          <label>Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
-          </label>
-          <label>Notes
-            <textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-          </label>
-        </div>
-        <div class="entry-actions">
-          ${isSparkSource ? `<button class="ghost-button" onclick="showPage('sparkTracker')">Open Spark Tracker</button>` : ""}
-          <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
-        </div>
-      </div>
-    `;
-  }).join("");
+  const mainJob = getSourceIncome(month, "Main Job");
+  const spark = getSourceIncome(month, "Walmart/Spark");
+  const childSupport = getSourceIncome(month, "Child Support");
+  const other = month.income.reduce((sum, entry) => {
+    const source = (entry.source || "").toLowerCase();
+    if (!/main job|walmart\/spark|spark|child support/i.test(source)) {
+      return sum + (Number(entry.amount) || 0);
+    }
+    return sum;
+  }, 0);
+
+  container.innerHTML = `
+    <div class="dashboard-cards">
+      <div class="card"><h4>Main Job</h4><p>${formatCurrency(mainJob)}</p></div>
+      <div class="card"><h4>Child Support</h4><p>${formatCurrency(childSupport)}</p></div>
+      <div class="card"><h4>Spark</h4><p>${formatCurrency(spark)}</p></div>
+      <div class="card"><h4>Other Income</h4><p>${formatCurrency(other)}</p></div>
+      <div class="card"><h4>Total Income</h4><p>${formatCurrency(getMonthlyIncome(month))}</p></div>
+    </div>
+  `;
 }
 
 function renderBillsSection() {
@@ -1484,6 +1899,13 @@ function addIncomeRow() {
 
 function updateIncomeField(index, field, value) {
   const month = getSelectedMonthData();
+  const entry = month.income[index];
+  if (!entry) {
+    return;
+  }
+  if (/spark/i.test(entry.source || "")) {
+    return; // Spark income is computed from Spark Tracker and cannot be edited here.
+  }
   month.income[index][field] = field === "amount" ? Number(value) || 0 : value;
   saveState();
   renderDashboard();
@@ -1491,7 +1913,12 @@ function updateIncomeField(index, field, value) {
 }
 
 function removeIncomeRow(index) {
-  getSelectedMonthData().income.splice(index, 1);
+  const month = getSelectedMonthData();
+  const entry = month.income[index];
+  if (entry && /spark/i.test(entry.source || "")) {
+    return; // Spark income row should stay and remain tracker-driven.
+  }
+  month.income.splice(index, 1);
   saveState();
   renderIncomeSection();
   renderDashboard();
@@ -1837,6 +2264,10 @@ function getMonthlyBills(month) {
 }
 
 function getSourceIncome(month, source) {
+  if ((source || "").toLowerCase().includes("spark")) {
+    return getSparkSummary(month).totalEarnings;
+  }
+
   return month.income
     .filter((entry) => (entry.source || "").toLowerCase() === source.toLowerCase())
     .reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
@@ -2075,5 +2506,19 @@ window.removePriority = removePriority;
 window.updateDefaultCategories = updateDefaultCategories;
 window.exportBudget = exportBudget;
 window.openImport = openImport;
+window.setThemeMode = setThemeMode;
+window.setAccentColor = setAccentColor;
+window.setBackgroundStyle = setBackgroundStyle;
+window.setBackgroundColor = setBackgroundColor;
+window.setPatternColor = setPatternColor;
+window.setPanelColor = setPanelColor;
+window.setTabColor = setTabColor;
+window.setCardOpacity = setCardOpacity;
+window.resetTheme = resetTheme;
+window.scrollToTop = scrollToTop;
+window.handleAuthSubmit = handleAuthSubmit;
+window.openAuthPage = openAuthPage;
+window.showWelcomePage = showWelcomePage;
+window.handleSignOut = handleSignOut;
 
-document.addEventListener("DOMContentLoaded", initializePlanner);
+document.addEventListener("DOMContentLoaded", initializeAuth);

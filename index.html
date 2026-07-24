@@ -8,9 +8,48 @@
 </head>
 <body>
 
+<div id="welcomePage" class="page welcome-page">
+  <div class="welcome-card">
+    <button class="top-right-auth-button" onclick="openAuthPage()">Sign In / Create Account</button>
+    <h1>My Budget Planner</h1>
+    <p>Welcome back — sign in or create an account to manage your budget, goals, and Spark tracking.</p>
+  </div>
+</div>
+
+<!-- =========================
+     SIGN IN / CREATE ACCOUNT POPUP
+     ========================= -->
+<div id="authGate" class="auth-gate hidden">
+  <div class="auth-card">
+    <form id="authForm" class="auth-form" onsubmit="handleAuthSubmit(event)">
+      <label for="authEmail">Email</label>
+      <input type="email" id="authEmail" required autocomplete="email">
+
+      <label for="authPassword">Password</label>
+      <input type="password" id="authPassword" required autocomplete="current-password" minlength="6">
+
+      <button type="submit" id="authSubmitButton">Continue</button>
+    </form>
+
+    <p id="authStatus" class="auth-status hidden"></p>
+    <p id="authError" class="auth-error hidden"></p>
+    <button type="button" class="secondary-button" onclick="showWelcomePage()">Back</button>
+  </div>
+</div>
+
+<!-- =========================
+     MAIN APP (hidden until signed in)
+     ========================= -->
+<div id="appShell" class="hidden">
+
 <header>
-  <h1>My Budget Planner</h1>
-  <p>Plan • Track • Save • Grow</p>
+  <div class="header-text">
+    <h1>My Budget Planner</h1>
+    <p>Plan • Track • Save • Grow</p>
+  </div>
+  <div class="user-bar">
+    <span id="userEmailDisplay"></span>
+  </div>
 </header>
 
 <nav class="main-navigation">
@@ -144,10 +183,68 @@
     <button onclick="exportBudget()">Export Budget</button>
     <button onclick="openImport()">Import Budget</button>
     <input type="file" id="importInput" hidden>
+
+    <h3>Appearance</h3>
+    <div class="appearance-row">
+      <label for="themeModeSelect">Theme Mode</label>
+      <select id="themeModeSelect" onchange="setThemeMode(this.value)">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </div>
+    <div class="appearance-row">
+      <label for="backgroundStyleSelect">Background Style</label>
+      <select id="backgroundStyleSelect" onchange="setBackgroundStyle(this.value)">
+        <option value="checkered">Checkered</option>
+        <option value="solid">Solid</option>
+        <option value="gradient">Gradient</option>
+        <option value="stripes">Stripes</option>
+        <option value="dots">Dots</option>
+        <option value="waves">Waves</option>
+        <option value="sunburst">Sunburst</option>
+        <option value="grid">Grid</option>
+      </select>
+    </div>
+    <div class="appearance-row">
+      <label for="backgroundColorPicker">Background Color</label>
+      <input type="color" id="backgroundColorPicker" value="#ffffff" oninput="setBackgroundColor(this.value)">
+    </div>
+    <div class="appearance-row">
+      <label for="patternColorPicker">Background Accent Color</label>
+      <input type="color" id="patternColorPicker" value="#ff5fbf" oninput="setPatternColor(this.value)">
+    </div>
+    <div class="appearance-row">
+      <label for="panelColorPicker">Panel Tint Color</label>
+      <input type="color" id="panelColorPicker" value="#ffffff" oninput="setPanelColor(this.value)">
+    </div>
+    <div class="appearance-row">
+      <label for="tabColorPicker">Tab Tint Color</label>
+      <input type="color" id="tabColorPicker" value="#ffffff" oninput="setTabColor(this.value)">
+    </div>
+    <div class="appearance-row">
+      <label for="cardOpacityRange">Card Opacity</label>
+      <input type="range" id="cardOpacityRange" min="30" max="95" step="1" value="60" oninput="setCardOpacity(this.value)">
+      <span id="cardOpacityValue">60%</span>
+    </div>
+    <div class="appearance-row">
+      <label for="accentColorPicker">Accent Color</label>
+      <input type="color" id="accentColorPicker" value="#d81b6b" oninput="setAccentColor(this.value)">
+      <button onclick="resetTheme()">Reset to Default</button>
+    </div>
+
+    <div class="settings-footer">
+      <button id="signOutBottom" class="bottom-right-signout hidden" onclick="handleSignOut()">Sign Out</button>
+    </div>
   </section>
 
 </main>
+</div>
 
+<button id="backToTopBtn" class="back-to-top hidden" onclick="scrollToTop()" aria-label="Back to top">&#8593;</button>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
