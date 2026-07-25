@@ -557,6 +557,38 @@ h3 {
 .goal-row { margin-bottom: 0.6rem; }
 .goal-labels { display: flex; justify-content: space-between; margin-bottom: 0.25rem; font-weight: 600; }
 
+.goal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.goal-completed {
+  opacity: 0.55;
+}
+
+.goal-completed .progress-bar span {
+  background: #6b7280 !important;
+}
+
+.completed-goals-section {
+  margin-top: 1.75rem;
+  padding-top: 1rem;
+  border-top: 2px dashed var(--color-input-border);
+}
+
+.completed-goals-section h5 {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .chart-area canvas {
   width: 260px;
   height: 180px;

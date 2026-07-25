@@ -572,7 +572,7 @@ function normalizeCycle(cycle) {
       ...month,
       income: Array.isArray(month.income) ? month.income : [],
       bills: Array.isArray(month.bills) ? month.bills : [],
-      goals: Array.isArray(month.goals) ? month.goals : [],
+      goals: Array.isArray(month.goals) ? month.goals.map((g) => ({ completed: false, ...g })) : [],
       carFund: Array.isArray(month.carFund) ? month.carFund : [],
       spark: Array.isArray(month.spark) ? month.spark.map((entry) => ({ ...entry, collapsed: entry.collapsed ?? false })) : [],
       sparkTips: Array.isArray(month.sparkTips) ? month.sparkTips : [],
@@ -906,6 +906,14 @@ function getWeeklyGoalContributionTotal(month, goalName) {
   return ensureWeekData(month).reduce((sum, week) => sum + week.goals.reduce((weekSum, entry) => {
     return weekSum + ((entry.name || "").toLowerCase() === targetName ? (Number(entry.amount) || 0) : 0);
   }, 0), 0);
+}
+
+function hasWeeklyGoalEntries(month) {
+  return ensureWeekData(month).some((week) => week.goals.some((entry) => (Number(entry.amount) || 0) > 0));
+}
+
+function getWeeklyGoalContributionsTotal(month) {
+  return ensureWeekData(month).reduce((sum, week) => sum + week.goals.reduce((weekSum, entry) => weekSum + (Number(entry.amount) || 0), 0), 0);
 }
 
 function ensureActiveCycle() {
@@ -1437,6 +1445,44 @@ function renderIncomeSection() {
     return sum;
   }, 0);
 
+  const entryRows = month.income.map((entry, index) => {
+    const isSparkSource = /spark/i.test(entry.source || "");
+    if (isSparkSource) {
+      return `
+        <div class="entry-card">
+          <div class="entry-fields">
+            <label>Source
+              <input type="text" value="${escapeHtml(entry.source || "Walmart/Spark")}" disabled />
+            </label>
+            <label>Amount
+              <input type="text" value="${escapeHtml(formatCurrency(spark))}" readonly />
+            </label>
+          </div>
+          <p class="spark-note">Spark income is calculated from the Spark Tracker and cannot be edited here.</p>
+        </div>
+      `;
+    }
+    return `
+      <div class="entry-card">
+        <div class="entry-fields">
+          <label>Source
+            <input type="text" value="${escapeHtml(entry.source || "")}" onchange="updateIncomeField(${index}, 'source', this.value)" />
+          </label>
+          <label>Date
+            <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
+          </label>
+          <label>Amount
+            <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
+          </label>
+          <label>Notes
+            <textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
+          </label>
+        </div>
+        <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
+      </div>
+    `;
+  }).join("");
+
   container.innerHTML = `
     <div class="dashboard-cards">
       <div class="card"><h4>Main Job</h4><p>${formatCurrency(mainJob)}</p></div>
@@ -1445,6 +1491,7 @@ function renderIncomeSection() {
       <div class="card"><h4>Other Income</h4><p>${formatCurrency(other)}</p></div>
       <div class="card"><h4>Total Income</h4><p>${formatCurrency(getMonthlyIncome(month))}</p></div>
     </div>
+    ${entryRows}
   `;
 }
 
@@ -1491,39 +1538,65 @@ function renderGoalsSection() {
     return;
   }
 
-  container.innerHTML = month.goals.map((goal, index) => {
+  const colors = ["#d81b6b", "#7c3aed", "#0f766e", "#2563eb", "#f59e0b", "#dc2626", "#0891b2"];
+
+  function buildGoalCard(goal, realIndex) {
     const contributionAmount = getWeeklyGoalContributionTotal(month, goal.name);
     const totalSaved = getGoalCurrentAmount(month, goal);
     const progress = getGoalProgressForMonth(month, goal);
-    const colors = ["#d81b6b", "#7c3aed", "#0f766e", "#2563eb", "#f59e0b", "#dc2626", "#0891b2"];
-    const barColor = colors[index % colors.length];
+    const barColor = colors[realIndex % colors.length];
     return `
-      <div class="entry-card">
+      <div class="entry-card${goal.completed ? " goal-completed" : ""}">
         <div class="entry-fields">
           <label>Goal Name
-            <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${index}, 'name', this.value)" />
+            <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${realIndex}, 'name', this.value)" />
           </label>
           <label>Target Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${index}, 'targetAmount', this.value)" />
+            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${realIndex}, 'targetAmount', this.value)" />
           </label>
           <label>Current Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.currentAmount || "")}" onchange="updateGoalField(${index}, 'currentAmount', this.value)" />
+            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.currentAmount || "")}" onchange="updateGoalField(${realIndex}, 'currentAmount', this.value)" />
           </label>
           <label>Added from Weekly Contributions
             <input type="number" value="${escapeHtml(contributionAmount || "")}" readonly />
           </label>
           <label>Notes
-            <textarea onchange="updateGoalField(${index}, 'notes', this.value)">${escapeHtml(goal.notes || "")}</textarea>
+            <textarea onchange="updateGoalField(${realIndex}, 'notes', this.value)">${escapeHtml(goal.notes || "")}</textarea>
           </label>
         </div>
         <div class="progress-block">
           <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
           <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
         </div>
-        <button class="ghost-button" onclick="removeGoal(${index})">Remove</button>
+        <div class="goal-footer">
+          <label class="checkbox-label">
+            <input type="checkbox" ${goal.completed ? "checked" : ""} onchange="toggleGoalCompleted(${realIndex})" />
+            Mark as Done
+          </label>
+          <button class="ghost-button" onclick="removeGoal(${realIndex})">Remove</button>
+        </div>
       </div>
     `;
-  }).join("");
+  }
+
+  const activeHtml = month.goals
+    .map((goal, index) => ({ goal, index }))
+    .filter(({ goal }) => !goal.completed)
+    .map(({ goal, index }) => buildGoalCard(goal, index))
+    .join("");
+
+  const completedItems = month.goals
+    .map((goal, index) => ({ goal, index }))
+    .filter(({ goal }) => goal.completed);
+
+  const completedHtml = completedItems.length
+    ? `<div class="completed-goals-section">
+        <h5>Completed Goals (${completedItems.length})</h5>
+        ${completedItems.map(({ goal, index }) => buildGoalCard(goal, index)).join("")}
+      </div>`
+    : "";
+
+  container.innerHTML = activeHtml + completedHtml;
 }
 
 function renderCarFundSection() {
@@ -2070,6 +2143,18 @@ function removeGoal(index) {
   renderReports();
 }
 
+function toggleGoalCompleted(index) {
+  const month = getSelectedMonthData();
+  if (!month.goals[index]) {
+    return;
+  }
+  month.goals[index].completed = !month.goals[index].completed;
+  saveState();
+  renderGoalsSection();
+  renderDashboard();
+  renderReports();
+}
+
 function addCarFundEntry() {
   getSelectedMonthData().carFund.push({ date: "", amount: "", notes: "" });
   saveState();
@@ -2204,13 +2289,6 @@ function addSparkTipReceived() {
   receivedAmountInput.value = "";
   receivedDateInput.value = "";
 
-  const sparkIncomeEntry = month.income.find((entry) => /spark/i.test(entry.source || ""));
-  if (sparkIncomeEntry) {
-    sparkIncomeEntry.amount = (Number(sparkIncomeEntry.amount) || 0) + existingAmount + receivedAmount;
-  } else {
-    month.income.push({ source: "Walmart/Spark", date: "", amount: existingAmount + receivedAmount, notes: "Spark tip added" });
-  }
-
   saveState();
   renderSparkSection();
   renderIncomeSection();
@@ -2342,7 +2420,13 @@ function getMonthlyIncome(month) {
   if (hasWeeklyIncomeEntries(month)) {
     return weeklyIncome;
   }
-  return month.income.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
+  const nonSparkIncome = month.income.reduce((sum, entry) => {
+    if (/spark/i.test(entry.source || "")) {
+      return sum;
+    }
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+  return nonSparkIncome + getSparkSummary(month).totalEarnings;
 }
 
 function getMonthlyBills(month) {
@@ -2376,7 +2460,11 @@ function getAssignmentSpend(month) {
 }
 
 function getRemainingAmount(month) {
-  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month) - getWeeklyExpensesTotal(month);
+  const actualSavings = hasWeeklySavingsEntries(month) ? getWeeklySavingsTotal(month) : 0;
+  const goalContributions = hasWeeklyGoalEntries(month)
+    ? getWeeklyGoalContributionsTotal(month)
+    : month.goals.reduce((sum, goal) => sum + (Number(goal.currentAmount) || 0), 0);
+  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month) - getWeeklyExpensesTotal(month) - actualSavings - goalContributions;
 }
 
 function getGoalProgress(goal) {
@@ -2577,6 +2665,7 @@ window.removeBillRow = removeBillRow;
 window.addGoal = addGoal;
 window.updateGoalField = updateGoalField;
 window.removeGoal = removeGoal;
+window.toggleGoalCompleted = toggleGoalCompleted;
 window.addCarFundEntry = addCarFundEntry;
 window.updateCarFundTarget = updateCarFundTarget;
 window.updateCarFundEntry = updateCarFundEntry;
