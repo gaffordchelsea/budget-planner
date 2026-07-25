@@ -93,6 +93,19 @@
       </div>
     </div>
 
+    <div class="financial-summary-cards">
+      <div class="card compact-financial-card">
+        <h3>Goals</h3>
+        <p><strong>Total:</strong> <span id="dashboardGoalsTotal">$0</span></p>
+        <p class="spark-note"><strong>Remaining:</strong> <span id="dashboardGoalsRemaining">$0</span></p>
+      </div>
+      <div class="card compact-financial-card">
+        <h3 id="dashboardSavingsTabTitle">Car Fund</h3>
+        <p><strong>Total:</strong> <span id="dashboardSavingsTabTotal">$0</span></p>
+        <p class="spark-note"><strong>Remaining:</strong> <span id="dashboardSavingsTabRemaining">$0</span></p>
+      </div>
+    </div>
+
     <h3>Income Breakdown</h3>
     <div class="income-cards">
       <div class="card">
@@ -116,6 +129,19 @@
     <div class="health-score">
       <p id="healthScore">0 / 100</p>
     </div>
+
+    <div class="dashboard-tools">
+      <button class="ghost-button" onclick="undoLastAction()">Undo Last Action</button>
+      <button onclick="runRecalculateCheck()">Run Recalculate Check</button>
+    </div>
+
+    <div id="recalculateCheckResult" class="report-card"></div>
+
+    <div class="dashboard-tools">
+      <h3>Recent Activity</h3>
+      <button class="ghost-button" onclick="clearActivityLog()">Clear Activity</button>
+    </div>
+    <div id="recentActivity" class="report-card"></div>
   </section>
 
   <!-- =========================
@@ -163,9 +189,18 @@
 
     <div class="chart-area">
       <h3>Charts</h3>
-      <canvas id="incomeChart"></canvas>
-      <canvas id="goalChart"></canvas>
-      <canvas id="sparkChart"></canvas>
+      <div class="chart-card">
+        <h4>Income vs Bills (6 Months)</h4>
+        <canvas id="incomeChart"></canvas>
+      </div>
+      <div class="chart-card">
+        <h4>Goals Saved vs Goal Targets (6 Months)</h4>
+        <canvas id="goalChart"></canvas>
+      </div>
+      <div class="chart-card chart-card-wide">
+        <h4>Spark Earnings by Month (6 Months)</h4>
+        <canvas id="sparkChart"></canvas>
+      </div>
     </div>
   </section>
 
@@ -183,6 +218,16 @@
     <h3>Default Spending Categories</h3>
     <label for="settingsCategories">Enter categories separated by commas</label>
     <input id="settingsCategories" type="text" oninput="updateDefaultCategories(this.value)">
+
+    <h3>Goal Controls</h3>
+    <label class="checkbox-label" for="settingsLockCompletedGoals">
+      <input id="settingsLockCompletedGoals" type="checkbox" onchange="setLockCompletedGoals(this.checked)">
+      Lock Completed Goals (prevent edits to goals marked done)
+    </label>
+
+    <h3>Savings Tab Name</h3>
+    <label for="settingsCarFundLabel">Customize the Car Fund tab label</label>
+    <input id="settingsCarFundLabel" type="text" placeholder="Car Fund" oninput="updateCarFundLabel(this.value)">
 
     <h3>Data Backup</h3>
     <button onclick="exportBudget()">Export Budget</button>
