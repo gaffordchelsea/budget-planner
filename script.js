@@ -14,6 +14,8 @@ const DEFAULT_PANEL_COLOR = "#ffffff";
 const DEFAULT_TAB_COLOR = "#ffffff";
 const DEFAULT_BACKGROUND_STYLE = "checkered";
 const DEFAULT_CARD_OPACITY = 0.6;
+const ACTIVITY_LOG_LIMIT = 40;
+const UNDO_STACK_LIMIT = 30;
 const DEFAULT_SPENDING_CATEGORIES = [
   "Gas",
   "Groceries",
@@ -24,6 +26,28 @@ const DEFAULT_SPENDING_CATEGORIES = [
   "Entertainment",
   "Other"
 ];
+const DEFAULT_CAR_FUND_LABEL = "Car Fund";
+
+function createGoalId() {
+  return `goal-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function normalizeGoalName(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function sourceMatchesCategory(sourceValue, category) {
+  const source = String(sourceValue || "").trim().toLowerCase();
+  const target = String(category || "").trim().toLowerCase();
+
+  if (target === "main job") {
+    return /main job|home health/.test(source);
+  }
+  if (target === "child support") {
+    return /child support/.test(source);
+  }
+  return source === target;
+}
 
 /* ===================================================================
    Firebase setup. Each signed-in user gets their own document at
@@ -64,6 +88,10 @@ let themePrefs = {
 };
 let saveStateTimeout = null;
 let saveThemeTimeout = null;
+let pendingActivityMessage = "";
+let undoStack = [];
+let lastCommittedState = null;
+let isApplyingUndo = false;
 
 function openAuthPage(defaultMode = "signIn") {
   authMode = defaultMode;
@@ -182,6 +210,7 @@ async function startAppForUser(user) {
   ensureActiveCycle();
   activeCycleId = plannerState.currentCycleId;
   activeMonthName = plannerState.lastOpenedMonth || getCurrentMonthName();
+  resetUndoTracking();
 
   applyTheme();
   renderApp();
@@ -200,6 +229,8 @@ function stopAppForSignedOutUser() {
   }
   clearAuthError();
   clearAuthStatus();
+  undoStack = [];
+  lastCommittedState = null;
 }
 
 function loadLegacyLocalState() {
@@ -248,41 +279,6 @@ function loadLegacyThemePrefs() {
       cardOpacity: DEFAULT_CARD_OPACITY
     };
   }
-}
-
-function handleAuthSubmit(event) {
-  event.preventDefault();
-  const email = document.getElementById("authEmail").value.trim();
-  const password = document.getElementById("authPassword").value;
-
-  clearAuthError();
-  setAuthStatus(authMode === "signUp" ? "Creating account..." : "Signing in...");
-
-  if (authMode === "signUp") {
-    auth.createUserWithEmailAndPassword(email, password)
-      .then(() => {
-        clearAuthStatus();
-      })
-      .catch((error) => {
-        clearAuthStatus();
-        setAuthError(friendlyAuthError(error));
-      });
-    return;
-  }
-
-  auth.signInWithEmailAndPassword(email, password)
-    .then(() => {
-      clearAuthStatus();
-    })
-    .catch((error) => {
-      if (error.code === "auth/user-not-found") {
-        clearAuthStatus();
-        setAuthError("No account found. Switch to Create Account to register.");
-      } else {
-        clearAuthStatus();
-        setAuthError(friendlyAuthError(error));
-      }
-    });
 }
 
 function handleSignOut() {
@@ -510,6 +506,33 @@ function scrollToTop() {
 }
 
 function saveState() {
+  const actionLabel = pendingActivityMessage;
+  commitPendingActivity();
+
+  if (plannerState) {
+    if (!lastCommittedState) {
+      lastCommittedState = cloneState(plannerState);
+    } else {
+      const currentSerialized = JSON.stringify(plannerState);
+      const lastSerialized = JSON.stringify(lastCommittedState);
+      if (currentSerialized !== lastSerialized) {
+        if (!isApplyingUndo) {
+          undoStack.unshift({
+            state: cloneState(lastCommittedState),
+            label: actionLabel || "Update",
+            createdAt: new Date().toISOString()
+          });
+          undoStack = undoStack.slice(0, UNDO_STACK_LIMIT);
+        }
+        lastCommittedState = cloneState(plannerState);
+      }
+    }
+  }
+
+  if (isApplyingUndo) {
+    isApplyingUndo = false;
+  }
+
   if (!currentUserId) {
     return;
   }
@@ -529,8 +552,11 @@ function buildDefaultState() {
     lastOpenedMonth: cycle.months[0].name,
     cycles: [cycle],
     priorities: ["Bills", "Savings", "Goals", "Fun", "Other"],
+    activityLog: [],
     settings: {
-      defaultCategories: DEFAULT_SPENDING_CATEGORIES.slice()
+      defaultCategories: DEFAULT_SPENDING_CATEGORIES.slice(),
+      lockCompletedGoals: false,
+      carFundLabel: DEFAULT_CAR_FUND_LABEL
     }
   };
 }
@@ -555,11 +581,52 @@ function normalizeState(state) {
   state.priorities = Array.isArray(state.priorities) && state.priorities.length
     ? state.priorities
     : ["Bills", "Savings", "Goals", "Fun", "Other"];
+  state.activityLog = Array.isArray(state.activityLog) ? state.activityLog.slice(0, ACTIVITY_LOG_LIMIT) : [];
   state.settings = state.settings || {};
   state.settings.defaultCategories = Array.isArray(state.settings.defaultCategories) && state.settings.defaultCategories.length
     ? state.settings.defaultCategories
     : DEFAULT_SPENDING_CATEGORIES.slice();
+  state.settings.lockCompletedGoals = Boolean(state.settings.lockCompletedGoals);
+  state.settings.carFundLabel = typeof state.settings.carFundLabel === "string"
+    ? state.settings.carFundLabel
+    : DEFAULT_CAR_FUND_LABEL;
   return state;
+}
+
+function getCarFundLabel() {
+  const rawLabel = plannerState && plannerState.settings ? plannerState.settings.carFundLabel : "";
+  const cleanLabel = String(rawLabel || "").trim();
+  return cleanLabel || DEFAULT_CAR_FUND_LABEL;
+}
+
+function cloneState(state) {
+  return JSON.parse(JSON.stringify(state));
+}
+
+function resetUndoTracking() {
+  undoStack = [];
+  lastCommittedState = plannerState ? cloneState(plannerState) : null;
+}
+
+function queueActivity(message) {
+  pendingActivityMessage = String(message || "").trim();
+}
+
+function commitPendingActivity() {
+  if (!plannerState || !pendingActivityMessage) {
+    return;
+  }
+
+  plannerState.activityLog = Array.isArray(plannerState.activityLog) ? plannerState.activityLog : [];
+  plannerState.activityLog.unshift({
+    id: `activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    message: pendingActivityMessage,
+    month: activeMonthName || "",
+    cycleId: activeCycleId || "",
+    createdAt: new Date().toISOString()
+  });
+  plannerState.activityLog = plannerState.activityLog.slice(0, ACTIVITY_LOG_LIMIT);
+  pendingActivityMessage = "";
 }
 
 function normalizeCycle(cycle) {
@@ -579,6 +646,7 @@ function normalizeCycle(cycle) {
       weeks: Array.isArray(month.weeks) && month.weeks.length ? month.weeks : createDefaultWeeks(month.name || month.month || month.title || monthNames[0], month.year || cycle.year || new Date().getFullYear()),
       assignmentCategories: Array.isArray(month.assignmentCategories) ? month.assignmentCategories : [],
       spending: Array.isArray(month.spending) ? month.spending : [],
+      notesArchive: Array.isArray(month.notesArchive) ? month.notesArchive : [],
       notes: month.notes || ""
     }));
   }
@@ -588,8 +656,31 @@ function normalizeCycle(cycle) {
   }
 
   cycle.months = cycle.months.slice(0, 6);
+  cycle.months.forEach(ensureGoalMetadata);
   cycle.months.forEach(migrateUntouchedJuly2026Weeks);
   return cycle;
+}
+
+function ensureGoalMetadata(month) {
+  month.goals = Array.isArray(month.goals) ? month.goals : [];
+  month.goals.forEach((goal) => {
+    if (!goal.id) {
+      goal.id = createGoalId();
+    }
+    if (typeof goal.completed !== "boolean") {
+      goal.completed = false;
+    }
+  });
+
+  const goalMap = new Map(month.goals.map((goal) => [normalizeGoalName(goal.name), goal.id]));
+  ensureWeekData(month).forEach((week) => {
+    week.goals = Array.isArray(week.goals) ? week.goals : [];
+    week.goals.forEach((entry) => {
+      if (!entry.goalId) {
+        entry.goalId = goalMap.get(normalizeGoalName(entry.name)) || "";
+      }
+    });
+  });
 }
 
 function createCycleForDate(date) {
@@ -634,13 +725,13 @@ function createMonthData(name, year) {
       { name: "Other", dueDate: "", amount: "", paid: false, recurring: false, notes: "" }
     ],
     goals: [
-      { name: "Past Due Car Payment", targetAmount: 5000, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Car Fund", targetAmount: 1000, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Credit Cards", targetAmount: 3000, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Mom", targetAmount: 1000, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Aunt Mary", targetAmount: 1000, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Dogs", targetAmount: 1500, currentAmount: 0, addedAmount: 0, notes: "" },
-      { name: "Other", targetAmount: 1000, currentAmount: 0, addedAmount: 0, notes: "" }
+      { id: createGoalId(), name: "Past Due Car Payment", targetAmount: 5000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Car Fund", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Credit Cards", targetAmount: 3000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Mom", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Aunt Mary", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Dogs", targetAmount: 1500, currentAmount: 0, addedAmount: 0, completed: false, notes: "" },
+      { id: createGoalId(), name: "Other", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" }
     ],
     carFund: [],
     carFundTargetAmount: 1000,
@@ -649,6 +740,7 @@ function createMonthData(name, year) {
     weeks: createDefaultWeeks(name, year),
     assignmentCategories: DEFAULT_SPENDING_CATEGORIES.map((category) => ({ name: category, amount: "", notes: "" })),
     spending: [],
+    notesArchive: [],
     notes: ""
   };
 }
@@ -866,6 +958,46 @@ function getWeeklyIncomeEntriesTotal(month, week) {
   }, 0);
 }
 
+function getWeeklyIncomeEntriesTotalBySource(month, week, sourceCategory) {
+  const weekStart = parseDateInput(week.startDate);
+  const weekEnd = parseDateInput(week.endDate);
+  if (!weekStart || !weekEnd || !Array.isArray(month.income)) {
+    return 0;
+  }
+
+  return month.income.reduce((sum, entry) => {
+    if (!entry || !entry.date) {
+      return sum;
+    }
+    const entryDate = parseDateInput(entry.date);
+    if (!entryDate || entryDate < weekStart || entryDate > weekEnd) {
+      return sum;
+    }
+    if (/spark/i.test(entry.source || "")) {
+      return sum;
+    }
+    if (!sourceMatchesCategory(entry.source, sourceCategory)) {
+      return sum;
+    }
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+}
+
+function getWeekIncomeBySource(month, week, sourceCategory) {
+  if (sourceMatchesCategory(sourceCategory, "Spark")) {
+    return getWeeklySparkIncome(month, week);
+  }
+
+  let total = getWeeklyIncomeEntriesTotalBySource(month, week, sourceCategory);
+  if (sourceMatchesCategory(sourceCategory, "Main Job")) {
+    total += Number(week.homeHealthIncome) || 0;
+  }
+  if (sourceMatchesCategory(sourceCategory, "Child Support")) {
+    total += Number(week.childSupportIncome) || 0;
+  }
+  return total;
+}
+
 function getWeekIncomeTotal(month, week) {
   return (Number(week.homeHealthIncome) || 0)
     + (Number(week.childSupportIncome) || 0)
@@ -901,10 +1033,21 @@ function getWeeklyExpensesTotal(month) {
   return ensureWeekData(month).reduce((sum, week) => sum + getWeekExpensesTotal(week), 0);
 }
 
-function getWeeklyGoalContributionTotal(month, goalName) {
-  const targetName = (goalName || "").toLowerCase();
+function getWeeklyGoalContributionTotal(month, goal) {
+  const targetGoalId = goal && goal.id ? goal.id : "";
+  const targetName = normalizeGoalName(goal && goal.name ? goal.name : "");
   return ensureWeekData(month).reduce((sum, week) => sum + week.goals.reduce((weekSum, entry) => {
-    return weekSum + ((entry.name || "").toLowerCase() === targetName ? (Number(entry.amount) || 0) : 0);
+    const entryGoalId = entry.goalId || "";
+    if (targetGoalId && entryGoalId && targetGoalId === entryGoalId) {
+      return weekSum + (Number(entry.amount) || 0);
+    }
+    if (targetName && !entryGoalId && normalizeGoalName(entry.name) === targetName) {
+      return weekSum + (Number(entry.amount) || 0);
+    }
+    if (targetGoalId && !entryGoalId && normalizeGoalName(entry.name) === targetName) {
+      return weekSum + (Number(entry.amount) || 0);
+    }
+    return weekSum;
   }, 0), 0);
 }
 
@@ -1008,6 +1151,7 @@ function renderMonthView() {
   }
 
   const weeks = ensureWeekData(month);
+  const carFundLabel = getCarFundLabel();
 
   monthArea.innerHTML = `
     <div class="month-view">
@@ -1027,7 +1171,7 @@ function renderMonthView() {
         <button data-section="income" class="tab-button ${activeMonthSection === "income" ? "active" : ""}" onclick="showMonthSection('income')">Income</button>
         <button data-section="bills" class="tab-button ${activeMonthSection === "bills" ? "active" : ""}" onclick="showMonthSection('bills')">Bills</button>
         <button data-section="goals" class="tab-button ${activeMonthSection === "goals" ? "active" : ""}" onclick="showMonthSection('goals')">Goals</button>
-        <button data-section="carFund" class="tab-button ${activeMonthSection === "carFund" ? "active" : ""}" onclick="showMonthSection('carFund')">Car Fund</button>
+        <button data-section="carFund" class="tab-button ${activeMonthSection === "carFund" ? "active" : ""}" onclick="showMonthSection('carFund')">${escapeHtml(carFundLabel)}</button>
         <button data-section="assignment" class="tab-button ${activeMonthSection === "assignment" ? "active" : ""}" onclick="showMonthSection('assignment')">Monthly Money Assignment</button>
         <button data-section="notes" class="tab-button ${activeMonthSection === "notes" ? "active" : ""}" onclick="showMonthSection('notes')">Notes</button>
       </div>
@@ -1055,7 +1199,7 @@ function renderMonthView() {
       </section>
 
       <section id="monthSection-carFund" class="month-section hidden">
-        <h4>Car Fund</h4>
+        <h4>${escapeHtml(carFundLabel)}</h4>
         <div id="carFundArea"></div>
         <button onclick="addCarFundEntry()">Add Contribution</button>
       </section>
@@ -1069,7 +1213,14 @@ function renderMonthView() {
 
       <section id="monthSection-notes" class="month-section hidden">
         <h4>Notes</h4>
-        <textarea id="monthNotes" placeholder="Anything you want to remember about this month..." oninput="updateMonthNotes(this.value)"></textarea>
+        <details id="monthNotesToggle" class="note-toggle">
+          <summary class="note-toggle-summary">Add Note</summary>
+          <textarea id="monthNotes" placeholder="Anything you want to remember about this month..." oninput="updateMonthNotes(this.value)"></textarea>
+        </details>
+        <div class="entry-actions">
+          <button class="ghost-button" onclick="archiveCurrentMonthNote()">Archive Current Note</button>
+        </div>
+        <div id="monthNotesArchive"></div>
       </section>
     </div>
   `;
@@ -1156,8 +1307,8 @@ function renderWeeklyTracker() {
       </div>
 
         <div class="dashboard-cards">
-          <div class="card"><h4>Main Job</h4><p>${formatCurrency(Number(selectedWeek.homeHealthIncome) || 0)}</p></div>
-          <div class="card"><h4>Child Support</h4><p>${formatCurrency(Number(selectedWeek.childSupportIncome) || 0)}</p></div>
+          <div class="card"><h4>Main Job</h4><p>${formatCurrency(getWeekIncomeBySource(month, selectedWeek, "Main Job"))}</p></div>
+          <div class="card"><h4>Child Support</h4><p>${formatCurrency(getWeekIncomeBySource(month, selectedWeek, "Child Support"))}</p></div>
           <div class="card"><h4>Spark</h4><p>${formatCurrency(getWeeklySparkIncome(month, selectedWeek))}</p></div>
           <div class="card"><h4>Total Income</h4><p>${formatCurrency(getWeekIncomeTotal(month, selectedWeek))}</p></div>
         </div>
@@ -1189,11 +1340,9 @@ function renderWeeklyTracker() {
                     <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
                   </label>
                   <label>Amount
-                    <input type="text" value="${escapeHtml(formatCurrency(displayAmount || 0))}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
+                    <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
                   </label>
-                  <label>Notes
-                    <textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-                  </label>
+                  ${renderNotesToggle(entry.notes, `<textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
                 </div>
                 <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
               `;
@@ -1214,9 +1363,7 @@ function renderWeeklyTracker() {
                   <input type="checkbox" ${entry.paid ? "checked" : ""} onchange="updateWeeklyBillEntry(${index}, 'paid', this.checked)" />
                   Paid
                 </label>
-                <label>Notes
-                  <textarea onchange="updateWeeklyBillEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-                </label>
+                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyBillEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
               </div>
               <button class="ghost-button" onclick="removeWeeklyBillEntry(${index})">Remove</button>
             `).join("")}
@@ -1232,9 +1379,7 @@ function renderWeeklyTracker() {
                 <label>Date
                   <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklySavingsEntry(${index}, 'date', this.value)" />
                 </label>
-                <label>Notes
-                  <textarea onchange="updateWeeklySavingsEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-                </label>
+                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklySavingsEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
               </div>
               <button class="ghost-button" onclick="removeWeeklySavingsEntry(${index})">Remove</button>
             `).join("")}
@@ -1244,15 +1389,21 @@ function renderWeeklyTracker() {
             <h4>Goals</h4>
             ${selectedWeek.goals.map((entry, index) => `
               <div class="entry-fields">
-                <label>Goal Name
-                  <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyGoalEntry(${index}, 'name', this.value)" />
+                <label>Goal
+                  <select onchange="updateWeeklyGoalEntry(${index}, 'goalId', this.value)">
+                    <option value="">Select goal</option>
+                    ${month.goals.map((goal) => {
+                      const selected = entry.goalId
+                        ? entry.goalId === goal.id
+                        : normalizeGoalName(entry.name) === normalizeGoalName(goal.name);
+                      return `<option value="${escapeHtml(goal.id || "")}" ${selected ? "selected" : ""}>${escapeHtml(goal.name || "Goal")}</option>`;
+                    }).join("")}
+                  </select>
                 </label>
                 <label>Amount
                   <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyGoalEntry(${index}, 'amount', this.value)" />
                 </label>
-                <label>Notes
-                  <textarea onchange="updateWeeklyGoalEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-                </label>
+                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyGoalEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
               </div>
               <button class="ghost-button" onclick="removeWeeklyGoalEntry(${index})">Remove</button>
             `).join("")}
@@ -1268,9 +1419,7 @@ function renderWeeklyTracker() {
                 <label>Amount
                   <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'amount', this.value)" />
                 </label>
-                <label>Notes
-                  <textarea onchange="updateWeeklyExpenseEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-                </label>
+                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyExpenseEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
               </div>
               <button class="ghost-button" onclick="removeWeeklyExpenseEntry(${index})">Remove</button>
             `).join("")}
@@ -1278,7 +1427,7 @@ function renderWeeklyTracker() {
           </div>
           <div class="entry-card">
             <h4>Notes</h4>
-            <textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>
+            ${renderNotesToggle(selectedWeek.notes, `<textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>`, "Week Note")}
           </div>
         </div>
     </div>
@@ -1321,6 +1470,7 @@ function updateWeeklyIncomeCategory(field, value) {
 function addWeeklyBillEntry() {
   const week = getSelectedWeekData();
   week.bills.push({ name: "", amount: "", paid: false, notes: "" });
+  queueActivity(`Added weekly bill in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1330,6 +1480,7 @@ function addWeeklyBillEntry() {
 function updateWeeklyBillEntry(index, field, value) {
   const week = getSelectedWeekData();
   week.bills[index][field] = ["amount"].includes(field) ? Number(value) || 0 : value;
+  queueActivity(`Updated weekly bill in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1337,7 +1488,9 @@ function updateWeeklyBillEntry(index, field, value) {
 }
 
 function removeWeeklyBillEntry(index) {
-  getSelectedWeekData().bills.splice(index, 1);
+  const week = getSelectedWeekData();
+  week.bills.splice(index, 1);
+  queueActivity(`Removed weekly bill from ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1371,27 +1524,49 @@ function removeWeeklySavingsEntry(index) {
 }
 
 function addWeeklyGoalEntry() {
+  const month = getSelectedMonthData();
   const week = getSelectedWeekData();
-  week.goals.push({ name: "", amount: "", notes: "" });
+  const firstGoal = month.goals.find((goal) => !goal.completed) || month.goals[0];
+  week.goals.push({ goalId: firstGoal ? firstGoal.id : "", name: firstGoal ? firstGoal.name : "", amount: "", notes: "" });
+  queueActivity(`Added weekly goal contribution in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
+  renderGoalsSection();
   renderDashboard();
   renderReports();
 }
 
 function updateWeeklyGoalEntry(index, field, value) {
+  const month = getSelectedMonthData();
   const week = getSelectedWeekData();
-  week.goals[index][field] = ["amount"].includes(field) ? Number(value) || 0 : value;
+  if (!week.goals[index]) {
+    return;
+  }
+
+  if (field === "amount") {
+    week.goals[index].amount = Number(value) || 0;
+  } else if (field === "goalId") {
+    const selectedGoal = month.goals.find((goal) => goal.id === value);
+    week.goals[index].goalId = value;
+    week.goals[index].name = selectedGoal ? selectedGoal.name : "";
+  } else {
+    week.goals[index][field] = value;
+  }
+  queueActivity(`Updated weekly goal contribution in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
+  renderGoalsSection();
   renderDashboard();
   renderReports();
 }
 
 function removeWeeklyGoalEntry(index) {
-  getSelectedWeekData().goals.splice(index, 1);
+  const week = getSelectedWeekData();
+  week.goals.splice(index, 1);
+  queueActivity(`Removed weekly goal contribution from ${week.name}.`);
   saveState();
   renderWeeklyTracker();
+  renderGoalsSection();
   renderDashboard();
   renderReports();
 }
@@ -1474,9 +1649,7 @@ function renderIncomeSection() {
           <label>Amount
             <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
           </label>
-          <label>Notes
-            <textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-          </label>
+          ${renderNotesToggle(entry.notes, `<textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
         </div>
         <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
       </div>
@@ -1522,9 +1695,7 @@ function renderBillsSection() {
           <input type="checkbox" ${entry.recurring ? "checked" : ""} onchange="updateBillField(${index}, 'recurring', this.checked)" />
           Recurring
         </label>
-        <label>Notes
-          <textarea onchange="updateBillField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateBillField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
       </div>
       <button class="ghost-button" onclick="removeBillRow(${index})">Remove</button>
     </div>
@@ -1539,41 +1710,43 @@ function renderGoalsSection() {
   }
 
   const colors = ["#d81b6b", "#7c3aed", "#0f766e", "#2563eb", "#f59e0b", "#dc2626", "#0891b2"];
+  const lockCompletedGoals = Boolean(plannerState && plannerState.settings && plannerState.settings.lockCompletedGoals);
 
   function buildGoalCard(goal, realIndex) {
-    const contributionAmount = getWeeklyGoalContributionTotal(month, goal.name);
+    const contributionAmount = getWeeklyGoalContributionTotal(month, goal);
     const totalSaved = getGoalCurrentAmount(month, goal);
     const progress = getGoalProgressForMonth(month, goal);
     const barColor = colors[realIndex % colors.length];
+    const isLockedCompletedGoal = lockCompletedGoals && goal.completed;
+    const disabledAttr = isLockedCompletedGoal ? "disabled" : "";
     return `
       <div class="entry-card${goal.completed ? " goal-completed" : ""}">
         <div class="entry-fields">
           <label>Goal Name
-            <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${realIndex}, 'name', this.value)" />
+            <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${realIndex}, 'name', this.value)" ${disabledAttr} />
           </label>
           <label>Target Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${realIndex}, 'targetAmount', this.value)" />
+            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${realIndex}, 'targetAmount', this.value)" ${disabledAttr} />
           </label>
           <label>Current Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.currentAmount || "")}" onchange="updateGoalField(${realIndex}, 'currentAmount', this.value)" />
+            <input type="number" min="0" step="0.01" value="${escapeHtml(totalSaved || "")}" onchange="updateGoalTotalAmount(${realIndex}, this.value)" ${disabledAttr} />
           </label>
           <label>Added from Weekly Contributions
             <input type="number" value="${escapeHtml(contributionAmount || "")}" readonly />
           </label>
-          <label>Notes
-            <textarea onchange="updateGoalField(${realIndex}, 'notes', this.value)">${escapeHtml(goal.notes || "")}</textarea>
-          </label>
+          ${renderNotesToggle(goal.notes, `<textarea onchange="updateGoalField(${realIndex}, 'notes', this.value)" ${disabledAttr}>${escapeHtml(goal.notes || "")}</textarea>`)}
         </div>
         <div class="progress-block">
           <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
           <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
+          ${isLockedCompletedGoal ? '<p class="spark-note goal-locked-note">Completed goal is locked. Turn off Lock Completed Goals to edit.</p>' : ""}
         </div>
         <div class="goal-footer">
           <label class="checkbox-label">
-            <input type="checkbox" ${goal.completed ? "checked" : ""} onchange="toggleGoalCompleted(${realIndex})" />
+            <input type="checkbox" ${goal.completed ? "checked" : ""} onchange="toggleGoalCompleted(${realIndex})" ${disabledAttr} />
             Mark as Done
           </label>
-          <button class="ghost-button" onclick="removeGoal(${realIndex})">Remove</button>
+          <button class="ghost-button" onclick="removeGoal(${realIndex})" ${disabledAttr}>Remove</button>
         </div>
       </div>
     `;
@@ -1596,7 +1769,17 @@ function renderGoalsSection() {
       </div>`
     : "";
 
-  container.innerHTML = activeHtml + completedHtml;
+  const lockControls = `
+    <div class="goal-lock-row">
+      <label class="checkbox-label">
+        <input type="checkbox" ${lockCompletedGoals ? "checked" : ""} onchange="setLockCompletedGoals(this.checked)" />
+        Lock Completed Goals
+      </label>
+      <p class="spark-note">When locked, completed goals stay visible but cannot be changed.</p>
+    </div>
+  `;
+
+  container.innerHTML = lockControls + activeHtml + completedHtml;
 }
 
 function renderCarFundSection() {
@@ -1634,9 +1817,7 @@ function renderCarFundSection() {
           <label>Amount
             <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateCarFundEntry(${index}, 'amount', this.value)" />
           </label>
-          <label>Notes
-            <textarea onchange="updateCarFundEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-          </label>
+          ${renderNotesToggle(entry.notes, `<textarea onchange="updateCarFundEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
         </div>
         <button class="ghost-button" onclick="removeCarFundEntry(${index})">Remove</button>
       </div>
@@ -1870,9 +2051,7 @@ function renderSparkSection() {
           </div>
 
           <div class="entry-fields">
-            <label>Notes
-              <textarea onchange="updateSparkField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-            </label>
+            ${renderNotesToggle(entry.notes, `<textarea onchange="updateSparkField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
           </div>
         `}
       </div>
@@ -1905,9 +2084,7 @@ function renderAssignmentSection() {
         <label>Amount
           <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateAssignmentField(${index}, 'amount', this.value)" />
         </label>
-        <label>Notes
-          <textarea onchange="updateAssignmentField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>
-        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateAssignmentField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
       </div>
       <button class="ghost-button" onclick="removeAssignmentCategory(${index})">Remove</button>
     </div>
@@ -1917,10 +2094,249 @@ function renderAssignmentSection() {
 function renderNotesSection() {
   const month = getSelectedMonthData();
   const textarea = document.getElementById("monthNotes");
+  const monthNotesToggle = document.getElementById("monthNotesToggle");
+  const monthNotesArchive = document.getElementById("monthNotesArchive");
   if (!textarea || !month) {
     return;
   }
   textarea.value = month.notes || "";
+  if (monthNotesToggle) {
+    monthNotesToggle.open = Boolean(String(month.notes || "").trim());
+  }
+
+  if (monthNotesArchive) {
+    const archiveItems = Array.isArray(month.notesArchive) ? month.notesArchive : [];
+    monthNotesArchive.innerHTML = archiveItems.length
+      ? `
+        <div class="report-card archived-notes-card">
+          <h5>Archived Notes</h5>
+          <ul class="archived-notes-list">
+            ${archiveItems.map((item, index) => {
+              const when = item.createdAt ? new Date(item.createdAt).toLocaleString("en-US") : "";
+              return `
+                <li>
+                  <div>
+                    <p>${escapeHtml(item.text || "")}</p>
+                    <span>${escapeHtml(when)}</span>
+                  </div>
+                  <div class="entry-actions">
+                    <button class="ghost-button" onclick="restoreArchivedNote(${index})">Use</button>
+                    <button class="ghost-button" onclick="deleteArchivedNote(${index})">Delete</button>
+                  </div>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        </div>
+      `
+      : "<p class=\"spark-note\">No archived notes yet.</p>";
+  }
+}
+
+function renderRecentActivity() {
+  const container = document.getElementById("recentActivity");
+  if (!container || !plannerState) {
+    return;
+  }
+
+  const items = Array.isArray(plannerState.activityLog) ? plannerState.activityLog.slice(0, 10) : [];
+  if (!items.length) {
+    container.innerHTML = "<p class=\"spark-note\">No activity yet. Start editing your budget and entries will appear here.</p>";
+    return;
+  }
+
+  container.innerHTML = `
+    <ul class="activity-list">
+      ${items.map((item) => {
+        const when = item.createdAt ? new Date(item.createdAt).toLocaleString("en-US") : "";
+        const monthLabel = item.month ? ` • ${escapeHtml(item.month)}` : "";
+        return `<li><strong>${escapeHtml(item.message || "Updated budget")}</strong><span>${escapeHtml(when)}${monthLabel}</span></li>`;
+      }).join("")}
+    </ul>
+  `;
+}
+
+function clearActivityLog() {
+  if (!plannerState) {
+    return;
+  }
+  plannerState.activityLog = [];
+  pendingActivityMessage = "";
+  saveState();
+  renderRecentActivity();
+}
+
+function undoLastAction() {
+  if (!undoStack.length) {
+    const result = document.getElementById("recalculateCheckResult");
+    if (result) {
+      result.innerHTML = "<p class=\"spark-note\">No previous action is available to undo.</p>";
+    }
+    return;
+  }
+
+  const currentPage = document.querySelector(".main-navigation button.active")?.getAttribute("data-page") || "dashboard";
+  const previous = undoStack.shift();
+  isApplyingUndo = true;
+  plannerState = normalizeState(cloneState(previous.state));
+  ensureActiveCycle();
+  activeCycleId = plannerState.currentCycleId;
+  activeMonthName = plannerState.lastOpenedMonth || getCurrentMonthName();
+
+  saveState();
+  renderMonthButtons();
+  renderMonthView();
+  renderSparkTrackerPage();
+  renderDashboard();
+  renderHistory();
+  renderReports();
+  renderSettings();
+  updateCycleTitle();
+  showPage(currentPage);
+}
+
+function setLockCompletedGoals(checked) {
+  plannerState.settings.lockCompletedGoals = Boolean(checked);
+  queueActivity(plannerState.settings.lockCompletedGoals
+    ? "Locked completed goals."
+    : "Unlocked completed goals.");
+  saveState();
+  renderGoalsSection();
+}
+
+function archiveCurrentMonthNote() {
+  const month = getSelectedMonthData();
+  const noteText = String(month.notes || "").trim();
+  if (!noteText) {
+    return;
+  }
+
+  month.notesArchive = Array.isArray(month.notesArchive) ? month.notesArchive : [];
+  month.notesArchive.unshift({
+    id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    text: noteText,
+    createdAt: new Date().toISOString()
+  });
+  month.notesArchive = month.notesArchive.slice(0, 60);
+  month.notes = "";
+
+  queueActivity("Archived a monthly note.");
+  saveState();
+  renderNotesSection();
+  renderDashboard();
+}
+
+function restoreArchivedNote(index) {
+  const month = getSelectedMonthData();
+  if (!Array.isArray(month.notesArchive) || !month.notesArchive[index]) {
+    return;
+  }
+
+  month.notes = month.notesArchive[index].text || "";
+  queueActivity("Restored an archived note to current notes.");
+  saveState();
+  renderNotesSection();
+}
+
+function deleteArchivedNote(index) {
+  const month = getSelectedMonthData();
+  if (!Array.isArray(month.notesArchive) || !month.notesArchive[index]) {
+    return;
+  }
+
+  month.notesArchive.splice(index, 1);
+  queueActivity("Deleted an archived note.");
+  saveState();
+  renderNotesSection();
+}
+
+function runRecalculateCheck() {
+  const result = document.getElementById("recalculateCheckResult");
+  const month = getSelectedMonthData();
+  if (!result || !month) {
+    return;
+  }
+
+  const warnings = [];
+  const notes = [];
+
+  const totalIncome = getMonthlyIncome(month);
+  const totalBills = getMonthlyBills(month);
+  const totalAssigned = getAssignmentSpend(month);
+  const remaining = getRemainingAmount(month);
+  const availableAfterBills = totalIncome - totalBills;
+
+  if (totalAssigned > availableAfterBills) {
+    warnings.push("Assigned money is higher than Income minus Bills.");
+  }
+
+  if (remaining < 0) {
+    warnings.push("Remaining balance is negative. Check assignments, expenses, or goal contributions.");
+  }
+
+  if (hasWeeklyIncomeEntries(month)) {
+    const weeklyIncome = getWeeklyIncomeTotal(month);
+    const monthlyEntryIncome = (month.income || []).reduce((sum, entry) => {
+      if (/spark/i.test(entry.source || "")) {
+        return sum;
+      }
+      return sum + (Number(entry.amount) || 0);
+    }, 0) + getSparkSummary(month).totalEarnings;
+    if (Math.abs(weeklyIncome - monthlyEntryIncome) > 0.01) {
+      warnings.push("Monthly income total does not match weekly-tracked income total.");
+    }
+
+    const undatedIncome = (month.income || []).some((entry) => {
+      const amount = Number(entry.amount) || 0;
+      return amount > 0 && !/spark/i.test(entry.source || "") && !entry.date;
+    });
+    if (undatedIncome) {
+      warnings.push("Some income entries have amounts but no date. In weekly mode, undated income is excluded.");
+    }
+  }
+
+  if (hasWeeklyBillEntries(month)) {
+    const weeklyBills = getWeeklyBillsTotal(month);
+    const monthlyBills = (month.bills || []).reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
+    if (Math.abs(weeklyBills - monthlyBills) > 0.01) {
+      warnings.push("Monthly bills total does not match weekly-tracked bills total.");
+    }
+  }
+
+  if (hasWeeklyGoalEntries(month)) {
+    const unlinkedWeeklyGoals = ensureWeekData(month).some((week) => {
+      return (week.goals || []).some((entry) => (Number(entry.amount) || 0) > 0 && !entry.goalId);
+    });
+    if (unlinkedWeeklyGoals) {
+      warnings.push("Some weekly goal contributions are not linked to a monthly goal.");
+    }
+  }
+
+  const overTargetGoals = (month.goals || []).filter((goal) => {
+    const target = Number(goal.targetAmount) || 0;
+    return target > 0 && getGoalCurrentAmount(month, goal) > target;
+  });
+  if (overTargetGoals.length) {
+    notes.push(`${overTargetGoals.length} goal(s) are above target, which might be intentional.`);
+  }
+
+  const paidNoAmount = (month.bills || []).filter((bill) => bill.paid && (Number(bill.amount) || 0) <= 0).length;
+  if (paidNoAmount > 0) {
+    warnings.push(`${paidNoAmount} paid bill(s) have no amount entered.`);
+  }
+
+  if (!warnings.length && !notes.length) {
+    result.innerHTML = "<p class=\"check-ok\">No issues found. Totals look consistent for this month.</p>";
+  } else {
+    result.innerHTML = `
+      ${warnings.length ? `<p class="check-warning-title">Warnings</p><ul class="check-warning-list">${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+      ${notes.length ? `<p class="check-note-title">Notes</p><ul class="check-note-list">${notes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+    `;
+  }
+
+  queueActivity(`Ran recalculation check (${warnings.length} warning${warnings.length === 1 ? "" : "s"}).`);
+  saveState();
+  renderRecentActivity();
 }
 
 function renderDashboard() {
@@ -1933,16 +2349,34 @@ function renderDashboard() {
   const dashboardBills = document.getElementById("dashboardBills");
   const dashboardSavings = document.getElementById("dashboardSavings");
   const dashboardRemaining = document.getElementById("dashboardRemaining");
+  const dashboardGoalsTotal = document.getElementById("dashboardGoalsTotal");
+  const dashboardGoalsRemaining = document.getElementById("dashboardGoalsRemaining");
+  const dashboardSavingsTabTitle = document.getElementById("dashboardSavingsTabTitle");
+  const dashboardSavingsTabTotal = document.getElementById("dashboardSavingsTabTotal");
+  const dashboardSavingsTabRemaining = document.getElementById("dashboardSavingsTabRemaining");
   const homeHealthIncome = document.getElementById("homeHealthIncome");
   const sparkIncome = document.getElementById("sparkIncome");
   const childSupportIncome = document.getElementById("childSupportIncome");
   const dashboardGoalProgress = document.getElementById("dashboardGoalProgress");
   const healthScore = document.getElementById("healthScore");
 
+  const goalsContributedAmount = getGoalsAmount(month);
+  const goalsTargetAmount = (month.goals || []).reduce((sum, goal) => sum + (Number(goal.targetAmount) || 0), 0);
+  const goalsRemainingAmount = Math.max(0, goalsTargetAmount - goalsContributedAmount);
+  const savingsTabLabel = getCarFundLabel();
+  const savingsTabContributedAmount = getCarFundTotal(month);
+  const savingsTabTargetAmount = Number(month.carFundTargetAmount || 0);
+  const savingsTabRemainingAmount = Math.max(0, savingsTabTargetAmount - savingsTabContributedAmount);
+
   if (dashboardIncome) dashboardIncome.textContent = formatCurrency(getMonthlyIncome(month));
   if (dashboardBills) dashboardBills.textContent = formatCurrency(getMonthlyBills(month));
   if (dashboardSavings) dashboardSavings.textContent = formatCurrency(getMonthlySavings(month));
   if (dashboardRemaining) dashboardRemaining.textContent = formatCurrency(getRemainingAmount(month));
+  if (dashboardGoalsTotal) dashboardGoalsTotal.textContent = formatCurrency(goalsTargetAmount);
+  if (dashboardGoalsRemaining) dashboardGoalsRemaining.textContent = formatCurrency(goalsRemainingAmount);
+  if (dashboardSavingsTabTitle) dashboardSavingsTabTitle.textContent = savingsTabLabel;
+  if (dashboardSavingsTabTotal) dashboardSavingsTabTotal.textContent = formatCurrency(savingsTabTargetAmount);
+  if (dashboardSavingsTabRemaining) dashboardSavingsTabRemaining.textContent = formatCurrency(savingsTabRemainingAmount);
   if (homeHealthIncome) homeHealthIncome.textContent = formatCurrency(getSourceIncome(month, "Main Job"));
   if (sparkIncome) sparkIncome.textContent = formatCurrency(getSourceIncome(month, "Walmart/Spark"));
   if (childSupportIncome) childSupportIncome.textContent = formatCurrency(getSourceIncome(month, "Child Support"));
@@ -1961,6 +2395,13 @@ function renderDashboard() {
 
   if (healthScore) {
     healthScore.textContent = `${getHealthScore(month)} / 100`;
+  }
+
+  renderRecentActivity();
+
+  const checkResult = document.getElementById("recalculateCheckResult");
+  if (checkResult && !checkResult.innerHTML.trim()) {
+    checkResult.innerHTML = "<p class=\"spark-note\">Run Recalculate Check to scan this month for mismatches and missing links.</p>";
   }
 }
 
@@ -2024,6 +2465,8 @@ function renderReports() {
 function renderSettings() {
   const prioritySettings = document.getElementById("prioritySettings");
   const settingsCategories = document.getElementById("settingsCategories");
+  const settingsLockCompletedGoals = document.getElementById("settingsLockCompletedGoals");
+  const settingsCarFundLabel = document.getElementById("settingsCarFundLabel");
   if (!prioritySettings) {
     return;
   }
@@ -2038,6 +2481,14 @@ function renderSettings() {
   if (settingsCategories) {
     settingsCategories.value = plannerState.settings.defaultCategories.join(", ");
   }
+
+  if (settingsLockCompletedGoals) {
+    settingsLockCompletedGoals.checked = Boolean(plannerState.settings.lockCompletedGoals);
+  }
+
+  if (settingsCarFundLabel) {
+    settingsCarFundLabel.value = getCarFundLabel();
+  }
 }
 
 function updateCycleTitle() {
@@ -2050,6 +2501,7 @@ function updateCycleTitle() {
 
 function addIncomeRow() {
   getSelectedMonthData().income.push({ source: "Other Income", date: "", amount: "", notes: "" });
+  queueActivity("Added monthly income row.");
   saveState();
   renderIncomeSection();
   renderWeeklyTracker();
@@ -2067,6 +2519,7 @@ function updateIncomeField(index, field, value) {
     return; // Spark income is computed from Spark Tracker and cannot be edited here.
   }
   month.income[index][field] = field === "amount" ? Number(value) || 0 : value;
+  queueActivity("Updated monthly income entry.");
   saveState();
   renderIncomeSection();
   renderWeeklyTracker();
@@ -2081,6 +2534,7 @@ function removeIncomeRow(index) {
     return; // Spark income row should stay and remain tracker-driven.
   }
   month.income.splice(index, 1);
+  queueActivity("Removed monthly income row.");
   saveState();
   renderIncomeSection();
   renderWeeklyTracker();
@@ -2090,6 +2544,7 @@ function removeIncomeRow(index) {
 
 function addBillRow() {
   getSelectedMonthData().bills.push({ name: "New Bill", dueDate: "", amount: "", paid: false, recurring: false, notes: "" });
+  queueActivity("Added monthly bill.");
   saveState();
   renderBillsSection();
   renderDashboard();
@@ -2105,6 +2560,7 @@ function updateBillField(index, field, value) {
   if (field === "recurring") {
     month.bills[index].recurring = value;
   }
+  queueActivity("Updated monthly bill.");
   saveState();
   renderDashboard();
   renderReports();
@@ -2112,6 +2568,7 @@ function updateBillField(index, field, value) {
 
 function removeBillRow(index) {
   getSelectedMonthData().bills.splice(index, 1);
+  queueActivity("Removed monthly bill.");
   saveState();
   renderBillsSection();
   renderDashboard();
@@ -2119,7 +2576,7 @@ function removeBillRow(index) {
 }
 
 function addGoal() {
-  getSelectedMonthData().goals.push({ name: "New Goal", targetAmount: 1000, currentAmount: 0, addedAmount: 0, notes: "" });
+  getSelectedMonthData().goals.push({ id: createGoalId(), name: "New Goal", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" });
   saveState();
   renderGoalsSection();
   renderDashboard();
@@ -2128,7 +2585,32 @@ function addGoal() {
 
 function updateGoalField(index, field, value) {
   const month = getSelectedMonthData();
+  if (plannerState.settings.lockCompletedGoals && month.goals[index] && month.goals[index].completed) {
+    return;
+  }
   month.goals[index][field] = ["targetAmount", "currentAmount", "addedAmount"].includes(field) ? Number(value) || 0 : value;
+  queueActivity("Updated monthly goal.");
+  saveState();
+  renderGoalsSection();
+  renderDashboard();
+  renderReports();
+}
+
+function updateGoalTotalAmount(index, value) {
+  const month = getSelectedMonthData();
+  const goal = month.goals[index];
+  if (!goal) {
+    return;
+  }
+  if (plannerState.settings.lockCompletedGoals && goal.completed) {
+    return;
+  }
+
+  const desiredTotal = Number(value) || 0;
+  const weeklyContribution = getWeeklyGoalContributionTotal(month, goal);
+  goal.currentAmount = Math.max(0, desiredTotal - weeklyContribution);
+
+  queueActivity("Updated monthly goal total amount.");
   saveState();
   renderGoalsSection();
   renderDashboard();
@@ -2136,7 +2618,12 @@ function updateGoalField(index, field, value) {
 }
 
 function removeGoal(index) {
-  getSelectedMonthData().goals.splice(index, 1);
+  const month = getSelectedMonthData();
+  if (plannerState.settings.lockCompletedGoals && month.goals[index] && month.goals[index].completed) {
+    return;
+  }
+  month.goals.splice(index, 1);
+  queueActivity("Removed monthly goal.");
   saveState();
   renderGoalsSection();
   renderDashboard();
@@ -2148,7 +2635,11 @@ function toggleGoalCompleted(index) {
   if (!month.goals[index]) {
     return;
   }
+  if (plannerState.settings.lockCompletedGoals && month.goals[index].completed) {
+    return;
+  }
   month.goals[index].completed = !month.goals[index].completed;
+  queueActivity(month.goals[index].completed ? "Marked goal as done." : "Moved goal back to active.");
   saveState();
   renderGoalsSection();
   renderDashboard();
@@ -2213,6 +2704,7 @@ function addSparkShift() {
     collapsed: false
   });
   activeSparkOrderIndex = month.spark.length - 1;
+  queueActivity("Added Spark order.");
   saveState();
   renderSparkSection();
   renderDashboard();
@@ -2230,6 +2722,7 @@ function updateSparkField(index, field, value) {
   month.spark[index][field] = ["estimatedPayout", "estimatedBasePay", "estimatedTip", "estimatedMiles", "estimatedHours", "estimatedMinutes", "actualBasePay", "actualTipReceived", "finalPayout", "actualMiles", "actualHours", "actualMinutes", "gasExpense", "otherExpense"].includes(field)
     ? Number(value) || 0
     : value;
+  queueActivity("Updated Spark order.");
   saveState();
   renderSparkSection();
   renderDashboard();
@@ -2289,6 +2782,7 @@ function addSparkTipReceived() {
   receivedAmountInput.value = "";
   receivedDateInput.value = "";
 
+  queueActivity("Added Spark tip entry.");
   saveState();
   renderSparkSection();
   renderIncomeSection();
@@ -2299,6 +2793,7 @@ function addSparkTipReceived() {
 function updateSparkTipEntry(index, field, value) {
   const month = getSelectedMonthData();
   month.sparkTips[index][field] = field === "amount" ? Number(value) || 0 : value;
+  queueActivity("Updated Spark tip entry.");
   saveState();
   renderSparkSection();
   renderDashboard();
@@ -2307,6 +2802,7 @@ function updateSparkTipEntry(index, field, value) {
 
 function removeSparkTipEntry(index) {
   getSelectedMonthData().sparkTips.splice(index, 1);
+  queueActivity("Removed Spark tip entry.");
   saveState();
   renderSparkSection();
   renderDashboard();
@@ -2323,6 +2819,7 @@ function removeSparkShift(index) {
 
 function addAssignmentCategory() {
   getSelectedMonthData().assignmentCategories.push({ name: "New Category", amount: "", notes: "" });
+  queueActivity("Added assignment category.");
   saveState();
   renderAssignmentSection();
   renderDashboard();
@@ -2332,6 +2829,7 @@ function addAssignmentCategory() {
 function updateAssignmentField(index, field, value) {
   const month = getSelectedMonthData();
   month.assignmentCategories[index][field] = field === "amount" ? Number(value) || 0 : value;
+  queueActivity("Updated assignment category.");
   saveState();
   renderAssignmentSection();
   renderDashboard();
@@ -2340,6 +2838,7 @@ function updateAssignmentField(index, field, value) {
 
 function removeAssignmentCategory(index) {
   getSelectedMonthData().assignmentCategories.splice(index, 1);
+  queueActivity("Removed assignment category.");
   saveState();
   renderAssignmentSection();
   renderDashboard();
@@ -2374,6 +2873,12 @@ function updateDefaultCategories(value) {
   saveState();
 }
 
+function updateCarFundLabel(value) {
+  plannerState.settings.carFundLabel = String(value || "");
+  saveState();
+  renderMonthView();
+}
+
 function exportBudget() {
   const blob = new Blob([JSON.stringify(plannerState, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -2404,6 +2909,7 @@ function bindImportListener() {
           plannerState = normalizeState(imported);
           activeCycleId = plannerState.currentCycleId;
           activeMonthName = plannerState.lastOpenedMonth || getCurrentMonthName();
+          resetUndoTracking();
           saveState();
           renderApp();
         } catch (error) {
@@ -2442,17 +2948,17 @@ function getSourceIncome(month, source) {
     return getSparkSummary(month).totalEarnings;
   }
 
+  if (hasWeeklyIncomeEntries(month)) {
+    return ensureWeekData(month).reduce((sum, week) => sum + getWeekIncomeBySource(month, week, source), 0);
+  }
+
   return month.income
-    .filter((entry) => (entry.source || "").toLowerCase() === source.toLowerCase())
+    .filter((entry) => sourceMatchesCategory(entry.source, source))
     .reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
 function getMonthlySavings(month) {
-  const weeklySavings = getWeeklySavingsTotal(month);
-  if (hasWeeklySavingsEntries(month)) {
-    return weeklySavings;
-  }
-  return Math.max(0, getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month));
+  return getWeeklySavingsTotal(month);
 }
 
 function getAssignmentSpend(month) {
@@ -2484,7 +2990,7 @@ function getGoalProgressForMonth(month, goal) {
 }
 
 function getGoalCurrentAmount(month, goal) {
-  return (Number(goal.currentAmount) || 0) + getWeeklyGoalContributionTotal(month, goal.name);
+  return (Number(goal.currentAmount) || 0) + getWeeklyGoalContributionTotal(month, goal);
 }
 
 function getGoalProgressValue(month) {
@@ -2591,31 +3097,72 @@ function drawCharts(cycle) {
 
   if (sparkCanvas) {
     const sparkTotals = cycle.months.map((month) => getSparkSummary(month).totalEarnings);
-    drawBarChart(sparkCanvas, cycle.months.map((month) => month.name), sparkTotals, ["#ec4899"]);
+    drawBarChart(sparkCanvas, cycle.months.map((month) => abbreviateMonthLabel(month.name)), sparkTotals, ["#ec4899"]);
   }
+}
+
+function abbreviateMonthLabel(label) {
+  const text = String(label || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.slice(0, 3);
 }
 
 function drawBarChart(canvas, labels, values, colors) {
   const context = canvas.getContext("2d");
-  const width = canvas.width || 260;
-  const height = canvas.height || 180;
+  if (!context) {
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const clientWidth = Math.max(220, Math.round(canvas.clientWidth || 260));
+  const clientHeight = Math.max(170, Math.round(canvas.clientHeight || 180));
+  canvas.width = Math.floor(clientWidth * dpr);
+  canvas.height = Math.floor(clientHeight * dpr);
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const width = clientWidth;
+  const height = clientHeight;
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, width, height);
 
-  const maxValue = Math.max(...values, 1);
-  const padding = 30;
-  const barWidth = Math.max(20, (width - padding * 2) / Math.max(values.length, 1) - 16);
+  const series = Array.isArray(values) && values.length ? values : [0];
+  const maxValue = Math.max(...series, 1);
+  const count = Math.max(series.length, 1);
 
-  values.forEach((value, index) => {
-    const barHeight = (value / maxValue) * (height - padding * 2);
-    const x = padding + index * (barWidth + 16);
-    const y = height - padding - barHeight;
+  const paddingTop = 22;
+  const paddingBottom = 36;
+  const paddingX = 20;
+  const innerWidth = Math.max(1, width - paddingX * 2);
+  const innerHeight = Math.max(1, height - paddingTop - paddingBottom);
+  const slotWidth = innerWidth / count;
+  const barWidth = Math.min(44, Math.max(18, slotWidth * 0.6));
+
+  context.strokeStyle = "rgba(17, 24, 39, 0.25)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(paddingX, height - paddingBottom + 0.5);
+  context.lineTo(width - paddingX, height - paddingBottom + 0.5);
+  context.stroke();
+
+  series.forEach((rawValue, index) => {
+    const value = Number(rawValue) || 0;
+    const barHeight = Math.max(0, (value / maxValue) * innerHeight);
+    const centerX = paddingX + slotWidth * index + slotWidth / 2;
+    const x = centerX - barWidth / 2;
+    const y = height - paddingBottom - barHeight;
+
     context.fillStyle = colors[index] || colors[0] || "#ec4899";
     context.fillRect(x, y, barWidth, barHeight);
+
     context.fillStyle = "#111827";
-    context.font = "12px sans-serif";
-    context.fillText(labels[index] || "", x, height - 10);
+    context.font = "11px sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "bottom";
+    context.fillText(formatCompactCurrency(value), centerX, Math.max(12, y - 2));
+
+    context.textBaseline = "alphabetic";
+    context.fillText(labels[index] || "", centerX, height - 12);
   });
 }
 
@@ -2642,6 +3189,15 @@ function formatCurrency(value) {
   }).format(Number(value) || 0);
 }
 
+function formatCompactCurrency(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 1
+  }).format(Number(value) || 0);
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -2649,6 +3205,16 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function renderNotesToggle(noteValue, textareaHtml, summaryLabel = "Add Note") {
+  const hasNote = Boolean(String(noteValue || "").trim());
+  return `
+    <details class="note-toggle" ${hasNote ? "open" : ""}>
+      <summary class="note-toggle-summary">${escapeHtml(summaryLabel)}</summary>
+      ${textareaHtml}
+    </details>
+  `;
 }
 
 window.showPage = showPage;
@@ -2664,6 +3230,7 @@ window.updateBillField = updateBillField;
 window.removeBillRow = removeBillRow;
 window.addGoal = addGoal;
 window.updateGoalField = updateGoalField;
+window.updateGoalTotalAmount = updateGoalTotalAmount;
 window.removeGoal = removeGoal;
 window.toggleGoalCompleted = toggleGoalCompleted;
 window.addCarFundEntry = addCarFundEntry;
@@ -2683,6 +3250,7 @@ window.addPriority = addPriority;
 window.updatePriority = updatePriority;
 window.removePriority = removePriority;
 window.updateDefaultCategories = updateDefaultCategories;
+window.updateCarFundLabel = updateCarFundLabel;
 window.exportBudget = exportBudget;
 window.openImport = openImport;
 window.setThemeMode = setThemeMode;
@@ -2699,5 +3267,12 @@ window.handleAuthSubmit = handleAuthSubmit;
 window.openAuthPage = openAuthPage;
 window.showWelcomePage = showWelcomePage;
 window.handleSignOut = handleSignOut;
+window.runRecalculateCheck = runRecalculateCheck;
+window.clearActivityLog = clearActivityLog;
+window.undoLastAction = undoLastAction;
+window.setLockCompletedGoals = setLockCompletedGoals;
+window.archiveCurrentMonthNote = archiveCurrentMonthNote;
+window.restoreArchivedNote = restoreArchivedNote;
+window.deleteArchivedNote = deleteArchivedNote;
 
 document.addEventListener("DOMContentLoaded", initializeAuth);
