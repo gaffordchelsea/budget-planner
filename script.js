@@ -92,6 +92,7 @@ let pendingActivityMessage = "";
 let undoStack = [];
 let lastCommittedState = null;
 let isApplyingUndo = false;
+let bankSyncClickCount = 0;
 
 function openAuthPage(defaultMode = "signIn") {
   authMode = defaultMode;
@@ -129,12 +130,30 @@ function updateAuthModeUI() {
 function initializeAuth() {
   bindImportListener();
   bindBackToTop();
+  bindBankSyncActions();
   showWelcomePage();
   auth.onAuthStateChanged((user) => {
     if (user) {
       startAppForUser(user);
     } else {
       stopAppForSignedOutUser();
+    }
+  });
+}
+
+function bindBankSyncActions() {
+  document.addEventListener("click", (event) => {
+    const applyButton = event.target.closest("#bankSyncApplyButton");
+    if (applyButton) {
+      event.preventDefault();
+      applyBankSyncDifference();
+      return;
+    }
+
+    const clearButton = event.target.closest("#bankSyncClearButton");
+    if (clearButton) {
+      event.preventDefault();
+      clearBankSyncAdjustment();
     }
   });
 }
@@ -739,6 +758,19 @@ function createMonthData(name, year) {
     sparkTips: [],
     weeks: createDefaultWeeks(name, year),
     assignmentCategories: DEFAULT_SPENDING_CATEGORIES.map((category) => ({ name: category, amount: "", notes: "" })),
+    bankSync: {
+      startingBalance: "",
+      accountOneName: "Bank App 1",
+      accountOneBalance: "",
+      accountTwoName: "Bank App 2",
+      accountTwoBalance: "",
+      accountThreeName: "Bank App 3",
+      accountThreeBalance: "",
+      currentBankBalance: "",
+      reconciliationAdjustment: "",
+      statusMessage: "",
+      debugMessage: ""
+    },
     spending: [],
     notesArchive: [],
     notes: ""
@@ -921,19 +953,34 @@ function getWeeklySparkIncome(month, week) {
     return 0;
   }
 
-  return month.spark.reduce((sum, entry) => {
+  const weekBasePay = month.spark.reduce((sum, entry) => {
     const acceptedDate = parseDateInput(entry.acceptedDate);
     if (!acceptedDate) {
       return sum;
     }
 
     if (acceptedDate >= weekStart && acceptedDate <= weekEnd) {
-      const payout = Number(entry.estimatedPayout) || (Number(entry.estimatedBasePay) || 0) + (Number(entry.estimatedTip) || 0);
-      return sum + payout;
+      const basePay = Number(entry.actualBasePay) || Number(entry.estimatedBasePay) || 0;
+      return sum + basePay;
     }
 
     return sum;
   }, 0);
+
+  const weekReceivedTips = Array.isArray(month.sparkTips)
+    ? month.sparkTips.reduce((sum, tip) => {
+      if (!tip || !tip.receivedDate) {
+        return sum;
+      }
+      const receivedDate = parseDateInput(tip.receivedDate);
+      if (!receivedDate || receivedDate < weekStart || receivedDate > weekEnd) {
+        return sum;
+      }
+      return sum + (Number(tip.amount) || 0);
+    }, 0)
+    : 0;
+
+  return weekBasePay + weekReceivedTips;
 }
 
 function getWeeklyIncomeEntriesTotal(month, week) {
@@ -1138,6 +1185,8 @@ function getCurrentMonthName() {
 function renderApp() {
   renderMonthButtons();
   renderMonthView();
+  renderAuditPage();
+  renderBankSyncPage();
   renderSparkTrackerPage();
   renderDashboard();
   renderHistory();
@@ -1151,6 +1200,12 @@ function showPage(pageId) {
   if (pageId === "budgetCycle") {
     activeWeeklyIndex = -1;
     renderMonthView();
+  }
+  if (pageId === "audit") {
+    renderAuditPage();
+  }
+  if (pageId === "bankSync") {
+    renderBankSyncPage();
   }
   if (pageId === "sparkTracker") {
     renderSparkTrackerPage();
@@ -1186,6 +1241,8 @@ function openMonth(monthName) {
   saveState();
   renderMonthButtons();
   renderMonthView();
+  renderAuditPage();
+  renderBankSyncPage();
   renderDashboard();
 }
 
@@ -1198,6 +1255,7 @@ function renderMonthView() {
 
   const weeks = ensureWeekData(month);
   const carFundLabel = getCarFundLabel();
+  const showMonthlySections = activeWeeklyIndex < 0;
 
   monthArea.innerHTML = `
     <div class="month-view">
@@ -1212,6 +1270,7 @@ function renderMonthView() {
 
       <div id="weeklyTrackerArea"></div>
 
+      ${showMonthlySections ? `
       <div class="month-tab-buttons">
         <button data-section="overview" class="tab-button ${activeMonthSection === "overview" ? "active" : ""}" onclick="showMonthSection('overview')">Overview</button>
         <button data-section="income" class="tab-button ${activeMonthSection === "income" ? "active" : ""}" onclick="showMonthSection('income')">Income</button>
@@ -1268,24 +1327,27 @@ function renderMonthView() {
         </div>
         <div id="monthNotesArchive"></div>
       </section>
+      ` : ""}
     </div>
   `;
 
-  renderMonthSections();
+  if (showMonthlySections) {
+    renderMonthSections();
+  }
   renderWeeklyTracker();
-  showMonthSection(activeMonthSection);
+  if (showMonthlySections) {
+    showMonthSection(activeMonthSection);
+  }
 }
 
 function showWeek(index) {
   activeWeeklyIndex = index;
-  updateWeekNavigation();
-  renderWeeklyTracker();
+  renderMonthView();
 }
 
 function showWeeklyOverview() {
   activeWeeklyIndex = -1;
-  updateWeekNavigation();
-  renderWeeklyTracker();
+  renderMonthView();
 }
 
 function updateWeekNavigation() {
@@ -1317,6 +1379,580 @@ function renderMonthSections() {
   renderNotesSection();
 }
 
+function renderAuditPage() {
+  const month = getSelectedMonthData();
+  const pageTitle = document.getElementById("auditPageTitle");
+  const buttons = document.getElementById("auditMonthButtons");
+  const area = document.getElementById("auditPageArea");
+  const cycle = getActiveCycle();
+  if (!month || !pageTitle || !buttons || !area || !cycle) {
+    return;
+  }
+
+  pageTitle.textContent = `Audit • ${month.name} ${month.year}`;
+  buttons.innerHTML = cycle.months.map((cycleMonth) => `
+    <button class="${cycleMonth.name === activeMonthName ? "active" : ""}" onclick="openMonth('${cycleMonth.name}')">${cycleMonth.name}</button>
+  `).join("");
+
+  renderAuditSection("auditPageArea");
+}
+
+function renderBankSyncPage() {
+  const month = getSelectedMonthData();
+  const pageTitle = document.getElementById("bankSyncPageTitle");
+  const buttons = document.getElementById("bankSyncMonthButtons");
+  const area = document.getElementById("bankSyncPageArea");
+  const cycle = getActiveCycle();
+  if (!month || !pageTitle || !buttons || !area || !cycle) {
+    return;
+  }
+
+  pageTitle.textContent = `Bank Sync • ${month.name} ${month.year}`;
+  buttons.innerHTML = cycle.months.map((cycleMonth) => `
+    <button class="${cycleMonth.name === activeMonthName ? "active" : ""}" onclick="openMonth('${cycleMonth.name}')">${cycleMonth.name}</button>
+  `).join("");
+
+  renderBankSyncSection("bankSyncPageArea");
+}
+
+function ensureMonthBankSync(month) {
+  month.bankSync = {
+    startingBalance: "",
+    accountOneName: "Bank App 1",
+    accountOneBalance: "",
+    accountTwoName: "Bank App 2",
+    accountTwoBalance: "",
+    accountThreeName: "Bank App 3",
+    accountThreeBalance: "",
+    currentBankBalance: "",
+    reconciliationAdjustment: "",
+    statusMessage: "",
+    debugMessage: "",
+    ...(month.bankSync || {})
+  };
+  return month.bankSync;
+}
+
+function getCurrentBankSyncBalance(month) {
+  const bankSync = ensureMonthBankSync(month);
+  const accountOne = Number(bankSync.accountOneBalance) || 0;
+  const accountTwo = Number(bankSync.accountTwoBalance) || 0;
+  const accountThree = Number(bankSync.accountThreeBalance) || 0;
+  const combined = accountOne + accountTwo + accountThree;
+  if (combined > 0) {
+    return combined;
+  }
+  return Number(bankSync.currentBankBalance) || 0;
+}
+
+function syncBankSyncInputsFromDom() {
+  const month = getSelectedMonthData();
+  const bankSync = ensureMonthBankSync(month);
+  const fieldIds = [
+    ["startingBalance", "bankSyncStartingBalance"],
+    ["accountOneName", "bankSyncAccountOneName"],
+    ["accountOneBalance", "bankSyncAccountOneBalance"],
+    ["accountTwoName", "bankSyncAccountTwoName"],
+    ["accountTwoBalance", "bankSyncAccountTwoBalance"],
+    ["accountThreeName", "bankSyncAccountThreeName"],
+    ["accountThreeBalance", "bankSyncAccountThreeBalance"],
+    ["currentBankBalance", "bankSyncCurrentBankBalance"],
+    ["reconciliationAdjustment", "bankSyncReconciliationAdjustment"]
+  ];
+
+  fieldIds.forEach(([field, id]) => {
+    const input = document.getElementById(id);
+    if (!input) {
+      return;
+    }
+    bankSync[field] = /Name$/.test(field) ? String(input.value || "") : Number(input.value) || 0;
+  });
+
+  return bankSync;
+}
+
+function updateBankSyncField(field, value) {
+  const month = getSelectedMonthData();
+  const bankSync = ensureMonthBankSync(month);
+  bankSync[field] = /Name$/.test(field) ? String(value || "") : Number(value) || 0;
+  bankSync.statusMessage = "";
+  bankSync.debugMessage = "";
+  saveState();
+  renderDashboard();
+  renderReports();
+}
+
+function roundCurrencyAmount(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function applyBankSyncDifference() {
+  const month = getSelectedMonthData();
+  const bankSync = syncBankSyncInputsFromDom() || ensureMonthBankSync(month);
+  try {
+    bankSyncClickCount += 1;
+    const bankBalance = roundCurrencyAmount(getCurrentBankSyncBalance(month));
+    const existingAdjustment = roundCurrencyAmount(Number(bankSync.reconciliationAdjustment) || 0);
+    const currentAppBalance = roundCurrencyAmount(getRemainingAmount(month));
+    const unadjustedAppBalance = roundCurrencyAmount(currentAppBalance - existingAdjustment);
+    const nextAdjustment = roundCurrencyAmount(bankBalance - unadjustedAppBalance);
+
+    bankSync.reconciliationAdjustment = nextAdjustment;
+    bankSync.statusMessage = `Applied. Adjustment set to ${formatCurrency(bankSync.reconciliationAdjustment)}.`;
+    bankSync.debugMessage = `Click ${bankSyncClickCount}. Bank ${formatCurrency(bankBalance)} | App ${formatCurrency(currentAppBalance)} | Existing Adj ${formatCurrency(existingAdjustment)} | Unadjusted App ${formatCurrency(unadjustedAppBalance)} | New Adj ${formatCurrency(nextAdjustment)}`;
+    queueActivity("Applied bank sync difference.");
+    saveState();
+    renderMonthSections();
+    renderBankSyncPage();
+    renderDashboard();
+    renderReports();
+  } catch (error) {
+    bankSyncClickCount += 1;
+    bankSync.statusMessage = "Apply failed.";
+    bankSync.debugMessage = `Click ${bankSyncClickCount} failed: ${error && error.message ? error.message : "Unknown error"}`;
+    saveState();
+    renderBankSyncPage();
+  }
+}
+
+function clearBankSyncAdjustment() {
+  const month = getSelectedMonthData();
+  const bankSync = syncBankSyncInputsFromDom() || ensureMonthBankSync(month);
+  bankSyncClickCount += 1;
+  bankSync.reconciliationAdjustment = 0;
+  bankSync.statusMessage = "Adjustment cleared.";
+  bankSync.debugMessage = `Click ${bankSyncClickCount}. Clear clicked. Adjustment reset to $0.00.`;
+  queueActivity("Cleared bank sync adjustment.");
+  saveState();
+  renderMonthSections();
+  renderBankSyncPage();
+  renderDashboard();
+  renderReports();
+}
+
+function renderBankSyncSection(containerId = "bankSyncPageArea") {
+  const month = getSelectedMonthData();
+  const container = document.getElementById(containerId);
+  if (!container || !month) {
+    return;
+  }
+
+  const bankSync = ensureMonthBankSync(month);
+  const startingBalance = Number(bankSync.startingBalance) || 0;
+  const accountOneName = String(bankSync.accountOneName || "").trim() || "Bank App 1";
+  const accountOneBalance = Number(bankSync.accountOneBalance) || 0;
+  const accountTwoName = String(bankSync.accountTwoName || "").trim() || "Bank App 2";
+  const accountTwoBalance = Number(bankSync.accountTwoBalance) || 0;
+  const accountThreeName = String(bankSync.accountThreeName || "").trim() || "Bank App 3";
+  const accountThreeBalance = Number(bankSync.accountThreeBalance) || 0;
+  const manualBankBalance = Number(bankSync.currentBankBalance) || 0;
+  const currentBankBalance = getCurrentBankSyncBalance(month);
+  const reconciliationAdjustment = Number(bankSync.reconciliationAdjustment) || 0;
+  const appBalance = getRemainingAmount(month);
+  const difference = roundCurrencyAmount(currentBankBalance - appBalance);
+  const existingAdjustment = roundCurrencyAmount(reconciliationAdjustment);
+  const unadjustedAppBalance = roundCurrencyAmount(appBalance - existingAdjustment);
+  const adjustmentNeeded = roundCurrencyAmount(currentBankBalance - unadjustedAppBalance);
+  const isUsingCombinedBalances = accountOneBalance > 0 || accountTwoBalance > 0 || accountThreeBalance > 0;
+
+  container.innerHTML = `
+    <div class="report-card">
+      <p class="spark-note">Use this if you had money in your account before using the app, or if you want app totals to reconcile to your bank. This section is manual entry only.</p>
+      <div class="entry-fields">
+        <label>Starting Bank Balance
+          <input id="bankSyncStartingBalance" type="number" step="0.01" value="${escapeHtml(startingBalance || "")}" oninput="updateBankSyncField('startingBalance', this.value)" />
+        </label>
+        <label>Account 1 Name
+          <input id="bankSyncAccountOneName" type="text" value="${escapeHtml(accountOneName)}" oninput="updateBankSyncField('accountOneName', this.value)" />
+        </label>
+        <label>${escapeHtml(accountOneName)} Balance
+          <input id="bankSyncAccountOneBalance" type="number" step="0.01" value="${escapeHtml(accountOneBalance || "")}" oninput="updateBankSyncField('accountOneBalance', this.value)" />
+        </label>
+        <label>Account 2 Name
+          <input id="bankSyncAccountTwoName" type="text" value="${escapeHtml(accountTwoName)}" oninput="updateBankSyncField('accountTwoName', this.value)" />
+        </label>
+        <label>${escapeHtml(accountTwoName)} Balance
+          <input id="bankSyncAccountTwoBalance" type="number" step="0.01" value="${escapeHtml(accountTwoBalance || "")}" oninput="updateBankSyncField('accountTwoBalance', this.value)" />
+        </label>
+        <label>Account 3 Name
+          <input id="bankSyncAccountThreeName" type="text" value="${escapeHtml(accountThreeName)}" oninput="updateBankSyncField('accountThreeName', this.value)" />
+        </label>
+        <label>${escapeHtml(accountThreeName)} Balance
+          <input id="bankSyncAccountThreeBalance" type="number" step="0.01" value="${escapeHtml(accountThreeBalance || "")}" oninput="updateBankSyncField('accountThreeBalance', this.value)" />
+        </label>
+        <label>Manual Combined Balance
+          <input id="bankSyncCurrentBankBalance" type="number" step="0.01" value="${escapeHtml(manualBankBalance || "")}" oninput="updateBankSyncField('currentBankBalance', this.value)" />
+        </label>
+        <label>Combined Bank Balance
+          <input type="text" value="${escapeHtml(formatCurrency(currentBankBalance))}" readonly />
+        </label>
+        <label>Reconciliation Adjustment
+          <input id="bankSyncReconciliationAdjustment" type="number" step="0.01" value="${escapeHtml(reconciliationAdjustment || "")}" oninput="updateBankSyncField('reconciliationAdjustment', this.value)" />
+        </label>
+      </div>
+      <p class="spark-note">${isUsingCombinedBalances ? "Combined Bank Balance is using the three bank app fields above." : "If you do not enter all three app balances yet, you can use Manual Combined Balance."}</p>
+      <p class="spark-note">Type the Adjustment Needed amount into Reconciliation Adjustment.</p>
+      <div class="dashboard-cards">
+        <div class="card"><h4>App Balance</h4><p>${formatCurrency(appBalance)}</p></div>
+        <div class="card"><h4>Bank Balance</h4><p>${formatCurrency(currentBankBalance)}</p></div>
+        <div class="card"><h4>Difference</h4><p>${formatCurrency(difference)}</p></div>
+        <div class="card"><h4>Adjustment Needed</h4><p>${formatCurrency(adjustmentNeeded)}</p></div>
+      </div>
+      <p class="spark-note">After you type the adjustment, the App Balance should move toward your Bank Balance automatically.</p>
+    </div>
+  `;
+}
+
+function renderWeekEntryToggle(summary, content, isOpen = false) {
+  return `
+    <details class="week-entry-toggle" ${isOpen ? "open" : ""}>
+      <summary class="week-entry-summary">${summary}</summary>
+      <div class="week-entry-body">${content}</div>
+    </details>
+  `;
+}
+
+function renderWeekPanel(title, total, content, isOpen = false) {
+  return `
+    <details class="week-panel-toggle" ${isOpen ? "open" : ""}>
+      <summary class="week-panel-summary">
+        <span>${escapeHtml(title)}</span>
+        <strong>${escapeHtml(formatCurrency(total))}</strong>
+      </summary>
+      <div class="week-panel-body">${content}</div>
+    </details>
+  `;
+}
+
+function buildMonthAuditEntries(month) {
+  const entries = [];
+  let nextId = 1;
+
+  function pushEntry(date, type, label, amount, impactsRemaining = true) {
+    const numericAmount = Number(amount) || 0;
+    if (!numericAmount) {
+      return;
+    }
+    entries.push({
+      id: `audit-${nextId++}`,
+      date: date || "",
+      type,
+      label,
+      amount: numericAmount,
+      impactsRemaining: Boolean(impactsRemaining)
+    });
+  }
+
+  (month.income || []).forEach((entry) => {
+    if (/spark/i.test(entry.source || "")) {
+      return;
+    }
+    pushEntry(entry.date || "", "Income", entry.source || "Income", Number(entry.amount) || 0, true);
+  });
+
+  (month.spark || []).forEach((entry, index) => {
+    const basePay = Number(entry.actualBasePay) || Number(entry.estimatedBasePay) || 0;
+    pushEntry(entry.acceptedDate || "", "Income", `Spark order ${index + 1} base pay`, basePay, true);
+
+    const gasAmount = Number(entry.gasExpense) || 0;
+    pushEntry(entry.acceptedDate || "", "Spark Gas", `Spark order ${index + 1} gas`, -Math.abs(gasAmount), true);
+
+    const otherCost = Number(entry.otherExpense) || 0;
+    pushEntry(entry.acceptedDate || "", "Spark Cost", `Spark order ${index + 1} other expense`, -Math.abs(otherCost), true);
+  });
+
+  (month.sparkTips || []).forEach((tip, index) => {
+    pushEntry(tip.receivedDate || "", "Income", `Spark tip ${index + 1} received`, Number(tip.amount) || 0, true);
+  });
+
+  if (hasWeeklyBillEntries(month)) {
+    ensureWeekData(month).forEach((week) => {
+      (week.bills || []).forEach((entry) => {
+        const isPaid = Boolean(entry.paid);
+        const label = `${week.name}: ${entry.name || "Bill"}${isPaid ? "" : " (Unpaid)"}`;
+        pushEntry(week.endDate || week.startDate || "", "Bill", label, -Math.abs(Number(entry.amount) || 0), isPaid);
+      });
+    });
+  } else {
+    (month.bills || []).forEach((entry) => {
+      const isPaid = Boolean(entry.paid);
+      const label = `${entry.name || "Bill"}${isPaid ? "" : " (Unpaid)"}`;
+      pushEntry(entry.dueDate || "", "Bill", label, -Math.abs(Number(entry.amount) || 0), isPaid);
+    });
+  }
+
+  ensureWeekData(month).forEach((week) => {
+    (week.expenses || []).forEach((entry) => {
+      pushEntry(week.endDate || week.startDate || "", "Expense", `${week.name}: ${entry.name || "Expense"}`, -Math.abs(Number(entry.amount) || 0), true);
+    });
+
+    (week.goals || []).forEach((entry) => {
+      pushEntry(week.endDate || week.startDate || "", "Goal", `${week.name}: ${entry.name || "Goal contribution"}`, -Math.abs(Number(entry.amount) || 0), true);
+    });
+
+    (week.savingsDeposits || []).forEach((entry) => {
+      pushEntry(entry.date || week.endDate || week.startDate || "", "Savings", `${week.name}: Savings deposit`, -Math.abs(Number(entry.amount) || 0), true);
+    });
+  });
+
+  (month.assignmentCategories || []).forEach((entry) => {
+    pushEntry("", "Assignment", `${entry.name || "Assignment"} (plan only)`, -Math.abs(Number(entry.amount) || 0), false);
+  });
+
+  return entries.sort((a, b) => {
+    const dateA = parseDateInput(a.date);
+    const dateB = parseDateInput(b.date);
+    if (!dateA && !dateB) {
+      return 0;
+    }
+    if (!dateA) {
+      return 1;
+    }
+    if (!dateB) {
+      return -1;
+    }
+    return dateB.getTime() - dateA.getTime();
+  });
+}
+
+function sortAuditRowsByDateDesc(rows) {
+  return rows.sort((a, b) => {
+    const dateA = parseDateInput(a.date);
+    const dateB = parseDateInput(b.date);
+    if (!dateA && !dateB) {
+      return 0;
+    }
+    if (!dateA) {
+      return 1;
+    }
+    if (!dateB) {
+      return -1;
+    }
+    return dateB.getTime() - dateA.getTime();
+  });
+}
+
+function buildDetailedAuditGroups(month) {
+  const groups = {
+    mainJob: [],
+    sparkDaily: [],
+    childSupport: [],
+    sparkGas: [],
+    expenses: [],
+    goals: [],
+    bills: []
+  };
+
+  function pushRow(group, date, label, amount, note = "") {
+    const numericAmount = Number(amount) || 0;
+    if (!numericAmount) {
+      return;
+    }
+    group.push({
+      date: date || "",
+      label,
+      amount: Math.abs(numericAmount),
+      note
+    });
+  }
+
+  (month.income || []).forEach((entry) => {
+    const amount = Number(entry.amount) || 0;
+    if (!amount) {
+      return;
+    }
+    if (sourceMatchesCategory(entry.source, "Main Job")) {
+      pushRow(groups.mainJob, entry.date || "", entry.source || "Main Job", amount, "Monthly income entry");
+      return;
+    }
+    if (sourceMatchesCategory(entry.source, "Child Support")) {
+      pushRow(groups.childSupport, entry.date || "", entry.source || "Child Support", amount, "Monthly income entry");
+    }
+  });
+
+  ensureWeekData(month).forEach((week) => {
+    const weekDate = week.endDate || week.startDate || "";
+
+    const mainJobIncome = Number(week.homeHealthIncome) || 0;
+    if (mainJobIncome > 0) {
+      pushRow(groups.mainJob, weekDate, `${week.name} Main Job`, mainJobIncome, "Weekly income field");
+    }
+
+    const childSupportIncome = Number(week.childSupportIncome) || 0;
+    if (childSupportIncome > 0) {
+      pushRow(groups.childSupport, weekDate, `${week.name} Child Support`, childSupportIncome, "Weekly income field");
+    }
+
+    (week.expenses || []).forEach((entry) => {
+      pushRow(groups.expenses, weekDate, `${week.name}: ${entry.name || "Expense"}`, Number(entry.amount) || 0);
+    });
+
+    (week.goals || []).forEach((entry) => {
+      pushRow(groups.goals, weekDate, `${week.name}: ${entry.name || "Goal contribution"}`, Number(entry.amount) || 0);
+    });
+
+    if (hasWeeklyBillEntries(month)) {
+      (week.bills || []).forEach((entry) => {
+        pushRow(groups.bills, weekDate, `${week.name}: ${entry.name || "Bill"}`, Number(entry.amount) || 0);
+      });
+    }
+  });
+
+  if (!hasWeeklyBillEntries(month)) {
+    (month.bills || []).forEach((entry) => {
+      pushRow(groups.bills, entry.dueDate || "", entry.name || "Bill", Number(entry.amount) || 0);
+    });
+  }
+
+  (month.spark || []).forEach((entry, index) => {
+    const basePay = Number(entry.actualBasePay) || Number(entry.estimatedBasePay) || 0;
+    if (!basePay) {
+      return;
+    }
+    pushRow(groups.sparkDaily, entry.acceptedDate || "", `Spark order ${index + 1} base pay`, basePay, "Included in daily Spark total");
+  });
+
+  (month.spark || []).forEach((entry, index) => {
+    const gasAmount = Number(entry.gasExpense) || 0;
+    if (!gasAmount) {
+      return;
+    }
+    pushRow(groups.sparkGas, entry.acceptedDate || "", `Spark order ${index + 1} gas`, gasAmount, "Separate gas entry");
+  });
+
+  (month.sparkTips || []).forEach((tip, index) => {
+    const tipAmount = Number(tip.amount) || 0;
+    if (!tipAmount) {
+      return;
+    }
+    pushRow(groups.sparkDaily, tip.receivedDate || "", `Spark tip ${index + 1} received`, tipAmount, "Included in daily Spark total");
+  });
+
+  const sparkByDate = new Map();
+  groups.sparkDaily.forEach((row) => {
+    const key = row.date || "No date";
+    if (!sparkByDate.has(key)) {
+      sparkByDate.set(key, {
+        date: row.date || "",
+        amount: 0,
+        basePay: 0,
+        tips: 0
+      });
+    }
+    const target = sparkByDate.get(key);
+    target.amount += Number(row.amount) || 0;
+    if (/tip/i.test(row.label || "")) {
+      target.tips += Number(row.amount) || 0;
+    } else {
+      target.basePay += Number(row.amount) || 0;
+    }
+  });
+
+  groups.sparkDaily = Array.from(sparkByDate.values()).map((row) => ({
+    date: row.date,
+    label: "Spark total",
+    amount: row.amount,
+    note: `Base ${formatCurrency(row.basePay)} + Tips ${formatCurrency(row.tips)}`
+  }));
+
+  groups.mainJob = sortAuditRowsByDateDesc(groups.mainJob);
+  groups.sparkDaily = sortAuditRowsByDateDesc(groups.sparkDaily);
+  groups.childSupport = sortAuditRowsByDateDesc(groups.childSupport);
+  groups.sparkGas = sortAuditRowsByDateDesc(groups.sparkGas);
+  groups.expenses = sortAuditRowsByDateDesc(groups.expenses);
+  groups.goals = sortAuditRowsByDateDesc(groups.goals);
+  groups.bills = sortAuditRowsByDateDesc(groups.bills);
+
+  return groups;
+}
+
+function renderAuditSection(containerId = "auditPageArea") {
+  const month = getSelectedMonthData();
+  const container = document.getElementById(containerId);
+  if (!container || !month || !plannerState) {
+    return;
+  }
+
+  const auditEntries = buildMonthAuditEntries(month).slice(0, 120);
+  const openingBalance = getStartingBankBalance(month) + getReconciliationAdjustment(month);
+  const timelineEntries = openingBalance !== 0
+    ? [{
+      id: "bank-sync-opening",
+      date: "",
+      type: "Bank Sync",
+      label: "Opening balance / reconciliation",
+      amount: openingBalance,
+      impactsRemaining: true
+    }, ...auditEntries]
+    : auditEntries;
+
+  const balanceByEntryId = new Map();
+  const balanceMetaByEntryId = new Map();
+  let runningIncludedBalance = 0;
+  const chronological = [...timelineEntries].sort((a, b) => {
+    const dateA = parseDateInput(a.date);
+    const dateB = parseDateInput(b.date);
+    if (!dateA && !dateB) {
+      return 0;
+    }
+    if (!dateA) {
+      return 1;
+    }
+    if (!dateB) {
+      return -1;
+    }
+    return dateA.getTime() - dateB.getTime();
+  });
+  chronological.forEach((item) => {
+    if (item.impactsRemaining) {
+      runningIncludedBalance += Number(item.amount) || 0;
+      balanceByEntryId.set(item.id, runningIncludedBalance);
+      balanceMetaByEntryId.set(item.id, "New total after this entry");
+      return;
+    }
+    balanceByEntryId.set(item.id, runningIncludedBalance);
+    balanceMetaByEntryId.set(item.id, "No change (excluded from Remaining)");
+  });
+
+  const ledgerHtml = chronological.length
+    ? `<div class="bank-ledger">${chronological.map((item) => {
+      const when = item.date ? formatDisplayDate(item.date) : "No date";
+      const amountClass = item.amount >= 0 ? "credit" : "debit";
+      const amountLabel = `${item.amount >= 0 ? "+" : "-"}${formatCurrency(Math.abs(item.amount))}`;
+      const runningBalance = formatCurrency(balanceByEntryId.get(item.id) || 0);
+      const runningMeta = balanceMetaByEntryId.get(item.id) || "New total after this entry";
+      return `
+        <div class="bank-row">
+          <div class="bank-date">${escapeHtml(when)}</div>
+          <div class="bank-main">
+            <strong>${escapeHtml(item.label)}</strong>
+            <span>${escapeHtml(item.type)}</span>
+          </div>
+          <div class="bank-amount ${amountClass}">${escapeHtml(amountLabel)}</div>
+          <div class="bank-balance">
+            <strong>${escapeHtml(runningBalance)}</strong>
+            <span>${escapeHtml(runningMeta)}</span>
+          </div>
+        </div>
+      `;
+    }).join("")}</div>`
+    : "<p class=\"spark-note\">No dated financial entries yet.</p>";
+
+  container.innerHTML = `
+    <div class="report-card">
+      <h5>Audit Timeline</h5>
+      <p class="spark-note">Single list in order: each entry updates the running total for Remaining.</p>
+      <div class="bank-ledger-header">
+        <span>Date</span>
+        <span>Transaction</span>
+        <span>Amount</span>
+        <span>Running Balance</span>
+      </div>
+      ${ledgerHtml}
+    </div>
+  `;
+}
+
 function renderWeeklyTracker() {
   const month = getSelectedMonthData();
   const container = document.getElementById("weeklyTrackerArea");
@@ -1339,7 +1975,124 @@ function renderWeeklyTracker() {
   const billsTotal = getWeekBillsTotal(selectedWeek);
   const savingsTotal = getWeekSavingsTotal(selectedWeek);
   const expensesTotal = getWeekExpensesTotal(selectedWeek);
+  const goalsTotal = selectedWeek.goals.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
   const summaryLabel = "Weekly";
+
+  const incomeEntriesHtml = month.income.map((entry, index) => {
+    const isSparkSource = /spark/i.test(entry.source || "");
+    const displayAmount = isSparkSource ? getWeeklySparkIncome(month, selectedWeek) : Number(entry.amount) || 0;
+    const summary = isSparkSource
+      ? `Spark • ${escapeHtml(formatCurrency(displayAmount || 0))}`
+      : `${escapeHtml(entry.source || "Income")} • ${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(displayAmount || 0))}`;
+    if (isSparkSource) {
+      return renderWeekEntryToggle(summary, `
+        <div class="entry-fields">
+          <label>Source
+            <input type="text" value="Spark" disabled />
+          </label>
+          <label>Amount
+            <input type="text" value="${escapeHtml(formatCurrency(displayAmount || 0))}" readonly />
+          </label>
+        </div>
+        <p class="spark-note">Spark income is calculated from the Spark Tracker and cannot be edited here.</p>
+      `, index === 0);
+    }
+    return renderWeekEntryToggle(summary, `
+      <div class="entry-fields">
+        <label>Source
+          <input type="text" value="${escapeHtml(entry.source || "")}" onchange="updateIncomeField(${index}, 'source', this.value)" />
+        </label>
+        <label>Date
+          <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
+        </label>
+        <label>Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
+        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
+      </div>
+      <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
+    `, false);
+  }).join("");
+
+  const billsEntriesHtml = selectedWeek.bills.map((entry, index) => renderWeekEntryToggle(
+    `${escapeHtml(entry.name || "Bill")} • ${escapeHtml(formatCurrency(entry.amount || 0))}${entry.paid ? " • Paid" : ""}`,
+    `
+      <div class="entry-fields">
+        <label>Bill Name
+          <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyBillEntry(${index}, 'name', this.value)" />
+        </label>
+        <label>Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyBillEntry(${index}, 'amount', this.value)" />
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" ${entry.paid ? "checked" : ""} onchange="updateWeeklyBillEntry(${index}, 'paid', this.checked)" />
+          Paid
+        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyBillEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
+      </div>
+      <button class="ghost-button" onclick="removeWeeklyBillEntry(${index})">Remove</button>
+    `,
+    false
+  )).join("");
+
+  const savingsEntriesHtml = selectedWeek.savingsDeposits.map((entry, index) => renderWeekEntryToggle(
+    `${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+    `
+      <div class="entry-fields">
+        <label>Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklySavingsEntry(${index}, 'amount', this.value)" />
+        </label>
+        <label>Date
+          <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklySavingsEntry(${index}, 'date', this.value)" />
+        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklySavingsEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
+      </div>
+      <button class="ghost-button" onclick="removeWeeklySavingsEntry(${index})">Remove</button>
+    `,
+    false
+  )).join("");
+
+  const goalsEntriesHtml = selectedWeek.goals.map((entry, index) => renderWeekEntryToggle(
+    `${escapeHtml(entry.name || "Goal contribution")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+    `
+      <div class="entry-fields">
+        <label>Goal
+          <select onchange="updateWeeklyGoalEntry(${index}, 'goalId', this.value)">
+            <option value="">Select goal</option>
+            ${month.goals.map((goal) => {
+              const selected = entry.goalId
+                ? entry.goalId === goal.id
+                : normalizeGoalName(entry.name) === normalizeGoalName(goal.name);
+              return `<option value="${escapeHtml(goal.id || "")}" ${selected ? "selected" : ""}>${escapeHtml(goal.name || "Goal")}</option>`;
+            }).join("")}
+          </select>
+        </label>
+        <label>Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyGoalEntry(${index}, 'amount', this.value)" />
+        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyGoalEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
+      </div>
+      <button class="ghost-button" onclick="removeWeeklyGoalEntry(${index})">Remove</button>
+    `,
+    false
+  )).join("");
+
+  const expensesEntriesHtml = selectedWeek.expenses.map((entry, index) => renderWeekEntryToggle(
+    `${escapeHtml(entry.name || "Expense")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+    `
+      <div class="entry-fields">
+        <label>Expense Name
+          <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'name', this.value)" />
+        </label>
+        <label>Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'amount', this.value)" />
+        </label>
+        ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyExpenseEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
+      </div>
+      <button class="ghost-button" onclick="removeWeeklyExpenseEntry(${index})">Remove</button>
+    `,
+    false
+  )).join("");
 
   container.innerHTML = `
     <div class="report-card">
@@ -1359,122 +2112,12 @@ function renderWeeklyTracker() {
           <div class="card"><h4>Total Income</h4><p>${formatCurrency(getWeekIncomeTotal(month, selectedWeek))}</p></div>
         </div>
         <div class="week-detail-grid">
-          <div class="entry-card">
-            <h4>Weekly Income Entries</h4>
-            ${month.income.map((entry, index) => {
-              const isSparkSource = /spark/i.test(entry.source || "");
-              const displayAmount = isSparkSource ? getSparkSummary(month).totalEarnings : Number(entry.amount) || 0;
-              if (isSparkSource) {
-                return `
-                  <div class="entry-fields">
-                    <label>Source
-                      <input type="text" value="Spark" disabled />
-                    </label>
-                    <label>Amount
-                      <input type="text" value="${escapeHtml(formatCurrency(displayAmount || 0))}" readonly />
-                    </label>
-                  </div>
-                  <p class="spark-note">Spark income is calculated from the Spark Tracker and cannot be edited here.</p>
-                `;
-              }
-              return `
-                <div class="entry-fields">
-                  <label>Source
-                    <input type="text" value="${escapeHtml(entry.source || "")}" onchange="updateIncomeField(${index}, 'source', this.value)" />
-                  </label>
-                  <label>Date
-                    <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateIncomeField(${index}, 'date', this.value)" />
-                  </label>
-                  <label>Amount
-                    <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateIncomeField(${index}, 'amount', this.value)" />
-                  </label>
-                  ${renderNotesToggle(entry.notes, `<textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
-                </div>
-                <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
-              `;
-            }).join("")}
-            <button onclick="addIncomeRow()">Add Income</button>
-          </div>
-          <div class="entry-card">
-            <h4>Bills</h4>
-            ${selectedWeek.bills.map((entry, index) => `
-              <div class="entry-fields">
-                <label>Bill Name
-                  <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyBillEntry(${index}, 'name', this.value)" />
-                </label>
-                <label>Amount
-                  <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyBillEntry(${index}, 'amount', this.value)" />
-                </label>
-                <label class="checkbox-label">
-                  <input type="checkbox" ${entry.paid ? "checked" : ""} onchange="updateWeeklyBillEntry(${index}, 'paid', this.checked)" />
-                  Paid
-                </label>
-                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyBillEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
-              </div>
-              <button class="ghost-button" onclick="removeWeeklyBillEntry(${index})">Remove</button>
-            `).join("")}
-            <button onclick="addWeeklyBillEntry()">Add Bill</button>
-          </div>
-          <div class="entry-card">
-            <h4>Savings</h4>
-            ${selectedWeek.savingsDeposits.map((entry, index) => `
-              <div class="entry-fields">
-                <label>Amount
-                  <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklySavingsEntry(${index}, 'amount', this.value)" />
-                </label>
-                <label>Date
-                  <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklySavingsEntry(${index}, 'date', this.value)" />
-                </label>
-                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklySavingsEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
-              </div>
-              <button class="ghost-button" onclick="removeWeeklySavingsEntry(${index})">Remove</button>
-            `).join("")}
-            <button onclick="addWeeklySavingsEntry()">Add Deposit</button>
-          </div>
-          <div class="entry-card">
-            <h4>Goals</h4>
-            ${selectedWeek.goals.map((entry, index) => `
-              <div class="entry-fields">
-                <label>Goal
-                  <select onchange="updateWeeklyGoalEntry(${index}, 'goalId', this.value)">
-                    <option value="">Select goal</option>
-                    ${month.goals.map((goal) => {
-                      const selected = entry.goalId
-                        ? entry.goalId === goal.id
-                        : normalizeGoalName(entry.name) === normalizeGoalName(goal.name);
-                      return `<option value="${escapeHtml(goal.id || "")}" ${selected ? "selected" : ""}>${escapeHtml(goal.name || "Goal")}</option>`;
-                    }).join("")}
-                  </select>
-                </label>
-                <label>Amount
-                  <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyGoalEntry(${index}, 'amount', this.value)" />
-                </label>
-                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyGoalEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
-              </div>
-              <button class="ghost-button" onclick="removeWeeklyGoalEntry(${index})">Remove</button>
-            `).join("")}
-            <button onclick="addWeeklyGoalEntry()">Add Goal Contribution</button>
-          </div>
-          <div class="entry-card">
-            <h4>Expenses</h4>
-            ${selectedWeek.expenses.map((entry, index) => `
-              <div class="entry-fields">
-                <label>Expense Name
-                  <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'name', this.value)" />
-                </label>
-                <label>Amount
-                  <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'amount', this.value)" />
-                </label>
-                ${renderNotesToggle(entry.notes, `<textarea onchange="updateWeeklyExpenseEntry(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
-              </div>
-              <button class="ghost-button" onclick="removeWeeklyExpenseEntry(${index})">Remove</button>
-            `).join("")}
-            <button onclick="addWeeklyExpenseEntry()">Add Expense</button>
-          </div>
-          <div class="entry-card">
-            <h4>Notes</h4>
-            ${renderNotesToggle(selectedWeek.notes, `<textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>`, "Week Note")}
-          </div>
+            ${renderWeekPanel("Weekly Income Entries", incomeTotal, `${incomeEntriesHtml}<button onclick="addIncomeRow()">Add Income</button>`, true)}
+            ${renderWeekPanel("Bills", billsTotal, `${billsEntriesHtml}<button onclick="addWeeklyBillEntry()">Add Bill</button>`, false)}
+            ${renderWeekPanel("Savings", savingsTotal, `${savingsEntriesHtml}<button onclick="addWeeklySavingsEntry()">Add Deposit</button>`, false)}
+            ${renderWeekPanel("Goals", goalsTotal, `${goalsEntriesHtml}<button onclick="addWeeklyGoalEntry()">Add Goal Contribution</button>`, false)}
+            ${renderWeekPanel("Expenses", expensesTotal, `${expensesEntriesHtml}<button onclick="addWeeklyExpenseEntry()">Add Expense</button>`, false)}
+            ${renderWeekPanel("Notes", 0, renderNotesToggle(selectedWeek.notes, `<textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>`, "Week Note"), false)}
         </div>
     </div>
   `;
@@ -1507,6 +2150,7 @@ function renderOverviewSection() {
 function updateWeeklyIncomeCategory(field, value) {
   const week = getSelectedWeekData();
   week[field] = Number(value) || 0;
+  queueActivity(`Updated weekly income in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1546,6 +2190,7 @@ function removeWeeklyBillEntry(index) {
 function addWeeklySavingsEntry() {
   const week = getSelectedWeekData();
   week.savingsDeposits.push({ amount: "", date: "", notes: "" });
+  queueActivity(`Added weekly savings in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1555,6 +2200,7 @@ function addWeeklySavingsEntry() {
 function updateWeeklySavingsEntry(index, field, value) {
   const week = getSelectedWeekData();
   week.savingsDeposits[index][field] = ["amount"].includes(field) ? Number(value) || 0 : value;
+  queueActivity(`Updated weekly savings in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1562,7 +2208,9 @@ function updateWeeklySavingsEntry(index, field, value) {
 }
 
 function removeWeeklySavingsEntry(index) {
-  getSelectedWeekData().savingsDeposits.splice(index, 1);
+  const week = getSelectedWeekData();
+  week.savingsDeposits.splice(index, 1);
+  queueActivity(`Removed weekly savings from ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1620,6 +2268,7 @@ function removeWeeklyGoalEntry(index) {
 function addWeeklyExpenseEntry() {
   const week = getSelectedWeekData();
   week.expenses.push({ name: "", amount: "", notes: "" });
+  queueActivity(`Added weekly expense in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1629,6 +2278,7 @@ function addWeeklyExpenseEntry() {
 function updateWeeklyExpenseEntry(index, field, value) {
   const week = getSelectedWeekData();
   week.expenses[index][field] = ["amount"].includes(field) ? Number(value) || 0 : value;
+  queueActivity(`Updated weekly expense in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1636,7 +2286,9 @@ function updateWeeklyExpenseEntry(index, field, value) {
 }
 
 function removeWeeklyExpenseEntry(index) {
-  getSelectedWeekData().expenses.splice(index, 1);
+  const week = getSelectedWeekData();
+  week.expenses.splice(index, 1);
+  queueActivity(`Removed weekly expense from ${week.name}.`);
   saveState();
   renderWeeklyTracker();
   renderDashboard();
@@ -1884,7 +2536,7 @@ function renderSparkTrackerPage() {
     </div>
 
     <h3>${month.name} ${month.year}</h3>
-    <p>Spark Earnings This Month: <span id="sparkMonthTotal">$0</span></p>
+    <p>Spark Received This Month: <span id="sparkMonthTotal">$0</span></p>
 
     <div class="month-tab-buttons">
       <button data-spark-section="shifts" class="${activeSparkSection === "shifts" ? "active" : ""}" onclick="showSparkTrackerTab('shifts')">Shifts</button>
@@ -1952,7 +2604,7 @@ function renderSparkSection() {
       <div class="card"><h4>Total Base Pay</h4><p>${formatCurrency(summary.totalBasePay)}</p></div>
       <div class="card"><h4>Tips Received</h4><p>${formatCurrency(summary.tipsReceived)}</p></div>
       <div class="card"><h4>Pending Tips</h4><p>${formatCurrency(summary.pendingTips)}</p></div>
-      <div class="card"><h4>Available Earnings</h4><p>${formatCurrency(summary.totalEarnings)}</p></div>
+      <div class="card"><h4>Received Earnings</h4><p>${formatCurrency(summary.totalEarnings)}</p></div>
       <div class="card"><h4>Net Profit</h4><p>${formatCurrency(summary.netProfit)}</p></div>
     </div>
 
@@ -2319,14 +2971,20 @@ function runRecalculateCheck() {
     const weeklyCategoryIncome = ensureWeekData(month).reduce((sum, week) => {
       return sum + (Number(week.homeHealthIncome) || 0) + (Number(week.childSupportIncome) || 0);
     }, 0);
+    const weeklySparkIncome = ensureWeekData(month).reduce((sum, week) => sum + getWeeklySparkIncome(month, week), 0);
     const monthlyEntryIncome = (month.income || []).reduce((sum, entry) => {
       if (/spark/i.test(entry.source || "")) {
         return sum;
       }
       return sum + (Number(entry.amount) || 0);
-    }, 0) + getSparkSummary(month).totalEarnings + weeklyCategoryIncome;
+    }, 0) + weeklySparkIncome + weeklyCategoryIncome;
     if (Math.abs(weeklyIncome - monthlyEntryIncome) > 0.01) {
       warnings.push("Monthly income total does not match weekly-tracked income total.");
+    }
+
+    const sparkReceivedIncome = getSparkSummary(month).totalEarnings;
+    if (Math.abs(weeklySparkIncome - sparkReceivedIncome) > 0.01) {
+      notes.push("Spark weekly-tracked income uses order payouts, which can differ from received Spark earnings if tips are still pending.");
     }
 
     const undatedIncome = (month.income || []).some((entry) => {
@@ -2392,6 +3050,9 @@ function renderDashboard() {
   const dashboardBills = document.getElementById("dashboardBills");
   const dashboardSavings = document.getElementById("dashboardSavings");
   const dashboardRemaining = document.getElementById("dashboardRemaining");
+  const dashboardGasTotal = document.getElementById("dashboardGasTotal");
+  const dashboardSparkGas = document.getElementById("dashboardSparkGas");
+  const dashboardExpenseGas = document.getElementById("dashboardExpenseGas");
   const dashboardGoalsTotal = document.getElementById("dashboardGoalsTotal");
   const dashboardGoalsRemaining = document.getElementById("dashboardGoalsRemaining");
   const dashboardSavingsTabTitle = document.getElementById("dashboardSavingsTabTitle");
@@ -2415,6 +3076,9 @@ function renderDashboard() {
   if (dashboardBills) dashboardBills.textContent = formatCurrency(getMonthlyBills(month));
   if (dashboardSavings) dashboardSavings.textContent = formatCurrency(getMonthlySavings(month));
   if (dashboardRemaining) dashboardRemaining.textContent = formatCurrency(getRemainingAmount(month));
+  if (dashboardGasTotal) dashboardGasTotal.textContent = formatCurrency(getTotalGasSpend(month));
+  if (dashboardSparkGas) dashboardSparkGas.textContent = formatCurrency(getSparkGasTotal(month));
+  if (dashboardExpenseGas) dashboardExpenseGas.textContent = formatCurrency(getExpenseGasTotal(month));
   if (dashboardGoalsTotal) dashboardGoalsTotal.textContent = formatCurrency(goalsTargetAmount);
   if (dashboardGoalsRemaining) dashboardGoalsRemaining.textContent = formatCurrency(goalsRemainingAmount);
   if (dashboardSavingsTabTitle) dashboardSavingsTabTitle.textContent = savingsTabLabel;
@@ -2986,8 +3650,34 @@ function getMonthlyBills(month) {
   return month.bills.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
+function getWeeklyPaidBillsTotal(month) {
+  return ensureWeekData(month).reduce((sum, week) => {
+    return sum + (week.bills || []).reduce((weekSum, entry) => {
+      if (!entry || !entry.paid) {
+        return weekSum;
+      }
+      return weekSum + (Number(entry.amount) || 0);
+    }, 0);
+  }, 0);
+}
+
+function getMonthlyPaidBills(month) {
+  if (hasWeeklyBillEntries(month)) {
+    return getWeeklyPaidBillsTotal(month);
+  }
+  return (month.bills || []).reduce((sum, entry) => {
+    if (!entry || !entry.paid) {
+      return sum;
+    }
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+}
+
 function getSourceIncome(month, source) {
   if ((source || "").toLowerCase().includes("spark")) {
+    if (hasWeeklyIncomeEntries(month)) {
+      return ensureWeekData(month).reduce((sum, week) => sum + getWeeklySparkIncome(month, week), 0);
+    }
     return getSparkSummary(month).totalEarnings;
   }
 
@@ -3008,12 +3698,51 @@ function getAssignmentSpend(month) {
   return month.assignmentCategories.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
 
+function getSparkGasTotal(month) {
+  return (month.spark || []).reduce((sum, entry) => sum + (Number(entry.gasExpense) || 0), 0);
+}
+
+function getExpenseGasTotal(month) {
+  return ensureWeekData(month).reduce((sum, week) => {
+    return sum + (week.expenses || []).reduce((weekSum, entry) => {
+      if (!entry || !/gas/i.test(String(entry.name || "").trim())) {
+        return weekSum;
+      }
+      return weekSum + (Number(entry.amount) || 0);
+    }, 0);
+  }, 0);
+}
+
+function getTotalGasSpend(month) {
+  return getSparkGasTotal(month) + getExpenseGasTotal(month);
+}
+
+function getSparkOtherExpenseTotal(month) {
+  return (month.spark || []).reduce((sum, entry) => sum + (Number(entry.otherExpense) || 0), 0);
+}
+
+function getStartingBankBalance(month) {
+  return Number((month.bankSync && month.bankSync.startingBalance) || 0);
+}
+
+function getReconciliationAdjustment(month) {
+  return Number((month.bankSync && month.bankSync.reconciliationAdjustment) || 0);
+}
+
 function getRemainingAmount(month) {
   const actualSavings = hasWeeklySavingsEntries(month) ? getWeeklySavingsTotal(month) : 0;
   const goalContributions = hasWeeklyGoalEntries(month)
     ? getWeeklyGoalContributionsTotal(month)
     : month.goals.reduce((sum, goal) => sum + (Number(goal.currentAmount) || 0), 0);
-  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month) - getWeeklyExpensesTotal(month) - actualSavings - goalContributions;
+  return getMonthlyIncome(month)
+    - getMonthlyPaidBills(month)
+    - getWeeklyExpensesTotal(month)
+    - actualSavings
+    - goalContributions
+    - getSparkGasTotal(month)
+    - getSparkOtherExpenseTotal(month)
+    + getStartingBankBalance(month)
+    + getReconciliationAdjustment(month);
 }
 
 function getGoalProgress(goal) {
@@ -3098,7 +3827,7 @@ function getSparkSummary(month) {
 }
 
 function getAvailableExtraMoney(month) {
-  return getMonthlyIncome(month) - getMonthlyBills(month) - getAssignmentSpend(month);
+  return getMonthlyIncome(month) - getMonthlyBills(month);
 }
 
 function getForecastDate(totalSaved, target, contributions) {
@@ -3288,6 +4017,9 @@ window.removeSparkShift = removeSparkShift;
 window.addAssignmentCategory = addAssignmentCategory;
 window.updateAssignmentField = updateAssignmentField;
 window.removeAssignmentCategory = removeAssignmentCategory;
+window.updateBankSyncField = updateBankSyncField;
+window.applyBankSyncDifference = applyBankSyncDifference;
+window.clearBankSyncAdjustment = clearBankSyncAdjustment;
 window.updateMonthNotes = updateMonthNotes;
 window.addPriority = addPriority;
 window.updatePriority = updatePriority;

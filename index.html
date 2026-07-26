@@ -60,6 +60,8 @@
 <nav class="main-navigation">
   <button data-page="dashboard" onclick="showPage('dashboard')">Dashboard</button>
   <button data-page="budgetCycle" onclick="showPage('budgetCycle')">Budget Cycle</button>
+  <button data-page="audit" onclick="showPage('audit')">Audit</button>
+  <button data-page="bankSync" onclick="showPage('bankSync')">Bank Sync</button>
   <button data-page="sparkTracker" onclick="showPage('sparkTracker')">Spark Tracker</button>
   <button data-page="history" onclick="showPage('history')">History</button>
   <button data-page="reports" onclick="showPage('reports')">Reports</button>
@@ -90,6 +92,12 @@
       <div class="card">
         <h3>Money Remaining</h3>
         <p id="dashboardRemaining">$0</p>
+      </div>
+      <div class="card">
+        <h3>Total Gas</h3>
+        <p id="dashboardGasTotal">$0</p>
+        <p class="spark-note"><strong>Spark:</strong> <span id="dashboardSparkGas">$0</span></p>
+        <p class="spark-note"><strong>Expenses:</strong> <span id="dashboardExpenseGas">$0</span></p>
       </div>
     </div>
 
@@ -153,6 +161,18 @@
     <div id="monthButtons" class="month-buttons"></div>
 
     <div id="monthArea"></div>
+  </section>
+
+  <section id="audit" class="page hidden">
+    <h2 id="auditPageTitle">Audit</h2>
+    <div id="auditMonthButtons" class="month-buttons"></div>
+    <div id="auditPageArea"></div>
+  </section>
+
+  <section id="bankSync" class="page hidden">
+    <h2 id="bankSyncPageTitle">Bank Sync</h2>
+    <div id="bankSyncMonthButtons" class="month-buttons"></div>
+    <div id="bankSyncPageArea"></div>
   </section>
 
   <!-- =========================
