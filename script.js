@@ -1009,6 +1009,52 @@ function getWeeklyIncomeTotal(month) {
   return ensureWeekData(month).reduce((sum, week) => sum + getWeekIncomeTotal(month, week), 0);
 }
 
+function getWeekOtherIncome(month, week) {
+  const weekStart = parseDateInput(week.startDate);
+  const weekEnd = parseDateInput(week.endDate);
+  if (!weekStart || !weekEnd || !Array.isArray(month.income)) {
+    return 0;
+  }
+
+  return month.income.reduce((sum, entry) => {
+    if (!entry || !entry.date) {
+      return sum;
+    }
+
+    const entryDate = parseDateInput(entry.date);
+    if (!entryDate || entryDate < weekStart || entryDate > weekEnd) {
+      return sum;
+    }
+
+    const source = entry.source || "";
+    if (/spark/i.test(source)) {
+      return sum;
+    }
+    if (sourceMatchesCategory(source, "Main Job") || sourceMatchesCategory(source, "Child Support")) {
+      return sum;
+    }
+
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+}
+
+function getOtherIncome(month) {
+  if (hasWeeklyIncomeEntries(month)) {
+    return ensureWeekData(month).reduce((sum, week) => sum + getWeekOtherIncome(month, week), 0);
+  }
+
+  return (month.income || []).reduce((sum, entry) => {
+    const source = entry.source || "";
+    if (/spark/i.test(source)) {
+      return sum;
+    }
+    if (sourceMatchesCategory(source, "Main Job") || sourceMatchesCategory(source, "Child Support")) {
+      return sum;
+    }
+    return sum + (Number(entry.amount) || 0);
+  }, 0);
+}
+
 function getWeekBillsTotal(week) {
   return week.bills.reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
 }
@@ -1612,13 +1658,7 @@ function renderIncomeSection() {
   const mainJob = getSourceIncome(month, "Main Job");
   const spark = getSourceIncome(month, "Walmart/Spark");
   const childSupport = getSourceIncome(month, "Child Support");
-  const other = month.income.reduce((sum, entry) => {
-    const source = (entry.source || "").toLowerCase();
-    if (!/main job|walmart\/spark|spark|child support/i.test(source)) {
-      return sum + (Number(entry.amount) || 0);
-    }
-    return sum;
-  }, 0);
+  const other = getOtherIncome(month);
 
   const entryRows = month.income.map((entry, index) => {
     const isSparkSource = /spark/i.test(entry.source || "");
@@ -2276,12 +2316,15 @@ function runRecalculateCheck() {
 
   if (hasWeeklyIncomeEntries(month)) {
     const weeklyIncome = getWeeklyIncomeTotal(month);
+    const weeklyCategoryIncome = ensureWeekData(month).reduce((sum, week) => {
+      return sum + (Number(week.homeHealthIncome) || 0) + (Number(week.childSupportIncome) || 0);
+    }, 0);
     const monthlyEntryIncome = (month.income || []).reduce((sum, entry) => {
       if (/spark/i.test(entry.source || "")) {
         return sum;
       }
       return sum + (Number(entry.amount) || 0);
-    }, 0) + getSparkSummary(month).totalEarnings;
+    }, 0) + getSparkSummary(month).totalEarnings + weeklyCategoryIncome;
     if (Math.abs(weeklyIncome - monthlyEntryIncome) > 0.01) {
       warnings.push("Monthly income total does not match weekly-tracked income total.");
     }
