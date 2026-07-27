@@ -93,6 +93,7 @@ let undoStack = [];
 let lastCommittedState = null;
 let isApplyingUndo = false;
 let bankSyncClickCount = 0;
+let weeklyDetailUiState = {};
 
 function openAuthPage(defaultMode = "signIn") {
   authMode = defaultMode;
@@ -1604,8 +1605,9 @@ function renderBankSyncSection(containerId = "bankSyncPageArea") {
 }
 
 function renderWeekEntryToggle(summary, content, isOpen = false) {
+  const [entryKey, openState] = Array.isArray(isOpen) ? isOpen : ["", isOpen];
   return `
-    <details class="week-entry-toggle" ${isOpen ? "open" : ""}>
+    <details class="week-entry-toggle" ${openState ? "open" : ""} ${entryKey ? `data-week-entry-key="${escapeHtml(entryKey)}"` : ""}>
       <summary class="week-entry-summary">${summary}</summary>
       <div class="week-entry-body">${content}</div>
     </details>
@@ -1613,8 +1615,9 @@ function renderWeekEntryToggle(summary, content, isOpen = false) {
 }
 
 function renderWeekPanel(title, total, content, isOpen = false) {
+  const [panelKey, openState] = Array.isArray(isOpen) ? isOpen : ["", isOpen];
   return `
-    <details class="week-panel-toggle" ${isOpen ? "open" : ""}>
+    <details class="week-panel-toggle" ${openState ? "open" : ""} ${panelKey ? `data-week-panel-key="${escapeHtml(panelKey)}"` : ""}>
       <summary class="week-panel-summary">
         <span>${escapeHtml(title)}</span>
         <strong>${escapeHtml(formatCurrency(total))}</strong>
@@ -1622,6 +1625,52 @@ function renderWeekPanel(title, total, content, isOpen = false) {
       <div class="week-panel-body">${content}</div>
     </details>
   `;
+}
+
+function getSparkAuditAmount(entry) {
+  return Number(entry.finalPayout)
+    || Number(entry.actualBasePay)
+    || Number(entry.estimatedBasePay)
+    || Number(entry.estimatedPayout)
+    || 0;
+}
+function getWeeklyDetailStateKey(monthName, weekName) {
+  return `${monthName}::${weekName}`;
+}
+
+function snapshotWeeklyDetailUiState(container, stateKey) {
+  if (!container) {
+    return;
+  }
+
+  weeklyDetailUiState[stateKey] = weeklyDetailUiState[stateKey] || { panels: {}, entries: {} };
+  const targetState = weeklyDetailUiState[stateKey];
+
+  container.querySelectorAll("[data-week-panel-key]").forEach((element) => {
+    const key = element.getAttribute("data-week-panel-key");
+    if (key) {
+      targetState.panels[key] = element.open;
+    }
+  });
+
+  container.querySelectorAll("[data-week-entry-key]").forEach((element) => {
+    const key = element.getAttribute("data-week-entry-key");
+    if (key) {
+      targetState.entries[key] = element.open;
+    }
+  });
+}
+
+function getWeeklyPanelOpenState(stateKey, panelKey, defaultValue) {
+  return weeklyDetailUiState[stateKey] && panelKey in weeklyDetailUiState[stateKey].panels
+    ? weeklyDetailUiState[stateKey].panels[panelKey]
+    : defaultValue;
+}
+
+function getWeeklyEntryOpenState(stateKey, entryKey, defaultValue) {
+  return weeklyDetailUiState[stateKey] && entryKey in weeklyDetailUiState[stateKey].entries
+    ? weeklyDetailUiState[stateKey].entries[entryKey]
+    : defaultValue;
 }
 
 function buildMonthAuditEntries(month) {
@@ -1651,8 +1700,11 @@ function buildMonthAuditEntries(month) {
   });
 
   (month.spark || []).forEach((entry, index) => {
-    const basePay = Number(entry.actualBasePay) || Number(entry.estimatedBasePay) || 0;
-    pushEntry(entry.acceptedDate || "", "Income", `Spark order ${index + 1} base pay`, basePay, true);
+    const sparkAmount = getSparkAuditAmount(entry);
+    const sparkLabel = Number(entry.finalPayout) || Number(entry.estimatedPayout)
+      ? `Spark order ${index + 1} payout`
+      : `Spark order ${index + 1} base pay`;
+    pushEntry(entry.acceptedDate || "", "Income", sparkLabel, sparkAmount, true);
 
     const gasAmount = Number(entry.gasExpense) || 0;
     pushEntry(entry.acceptedDate || "", "Spark Gas", `Spark order ${index + 1} gas`, -Math.abs(gasAmount), true);
@@ -1670,7 +1722,7 @@ function buildMonthAuditEntries(month) {
       (week.bills || []).forEach((entry) => {
         const isPaid = Boolean(entry.paid);
         const label = `${week.name}: ${entry.name || "Bill"}${isPaid ? "" : " (Unpaid)"}`;
-        pushEntry(week.endDate || week.startDate || "", "Bill", label, -Math.abs(Number(entry.amount) || 0), isPaid);
+        pushEntry(entry.date || week.endDate || week.startDate || "", "Bill", label, -Math.abs(Number(entry.amount) || 0), isPaid);
       });
     });
   } else {
@@ -1683,11 +1735,11 @@ function buildMonthAuditEntries(month) {
 
   ensureWeekData(month).forEach((week) => {
     (week.expenses || []).forEach((entry) => {
-      pushEntry(week.endDate || week.startDate || "", "Expense", `${week.name}: ${entry.name || "Expense"}`, -Math.abs(Number(entry.amount) || 0), true);
+      pushEntry(entry.date || week.endDate || week.startDate || "", "Expense", `${week.name}: ${entry.name || "Expense"}`, -Math.abs(Number(entry.amount) || 0), true);
     });
 
     (week.goals || []).forEach((entry) => {
-      pushEntry(week.endDate || week.startDate || "", "Goal", `${week.name}: ${entry.name || "Goal contribution"}`, -Math.abs(Number(entry.amount) || 0), true);
+      pushEntry(entry.date || week.endDate || week.startDate || "", "Goal", `${week.name}: ${entry.name || "Goal contribution"}`, -Math.abs(Number(entry.amount) || 0), true);
     });
 
     (week.savingsDeposits || []).forEach((entry) => {
@@ -1971,6 +2023,8 @@ function renderWeeklyTracker() {
   }
 
   const selectedWeek = weeks[activeWeeklyIndex];
+  const uiStateKey = getWeeklyDetailStateKey(month.name, selectedWeek.name);
+  snapshotWeeklyDetailUiState(container, uiStateKey);
   const incomeTotal = getWeekIncomeTotal(month, selectedWeek);
   const billsTotal = getWeekBillsTotal(selectedWeek);
   const savingsTotal = getWeekSavingsTotal(selectedWeek);
@@ -1984,6 +2038,7 @@ function renderWeeklyTracker() {
     const summary = isSparkSource
       ? `Spark • ${escapeHtml(formatCurrency(displayAmount || 0))}`
       : `${escapeHtml(entry.source || "Income")} • ${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(displayAmount || 0))}`;
+    const entryKey = `income-${index}`;
     if (isSparkSource) {
       return renderWeekEntryToggle(summary, `
         <div class="entry-fields">
@@ -1995,7 +2050,7 @@ function renderWeeklyTracker() {
           </label>
         </div>
         <p class="spark-note">Spark income is calculated from the Spark Tracker and cannot be edited here.</p>
-      `, index === 0);
+      `, [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, index === 0)]);
     }
     return renderWeekEntryToggle(summary, `
       <div class="entry-fields">
@@ -2011,15 +2066,20 @@ function renderWeeklyTracker() {
         ${renderNotesToggle(entry.notes, `<textarea onchange="updateIncomeField(${index}, 'notes', this.value)">${escapeHtml(entry.notes || "")}</textarea>`)}
       </div>
       <button class="ghost-button" onclick="removeIncomeRow(${index})">Remove</button>
-    `, false);
+    `, [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, false)]);
   }).join("");
 
-  const billsEntriesHtml = selectedWeek.bills.map((entry, index) => renderWeekEntryToggle(
-    `${escapeHtml(entry.name || "Bill")} • ${escapeHtml(formatCurrency(entry.amount || 0))}${entry.paid ? " • Paid" : ""}`,
-    `
+  const billsEntriesHtml = selectedWeek.bills.map((entry, index) => {
+    const entryKey = `bill-${index}`;
+    return renderWeekEntryToggle(
+      `${escapeHtml(entry.name || "Bill")} • ${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}${entry.paid ? " • Paid" : ""}`,
+      `
       <div class="entry-fields">
         <label>Bill Name
           <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyBillEntry(${index}, 'name', this.value)" />
+        </label>
+        <label>Date
+          <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklyBillEntry(${index}, 'date', this.value)" />
         </label>
         <label>Amount
           <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyBillEntry(${index}, 'amount', this.value)" />
@@ -2032,12 +2092,15 @@ function renderWeeklyTracker() {
       </div>
       <button class="ghost-button" onclick="removeWeeklyBillEntry(${index})">Remove</button>
     `,
-    false
-  )).join("");
+      [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, false)]
+    );
+  }).join("");
 
-  const savingsEntriesHtml = selectedWeek.savingsDeposits.map((entry, index) => renderWeekEntryToggle(
-    `${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
-    `
+  const savingsEntriesHtml = selectedWeek.savingsDeposits.map((entry, index) => {
+    const entryKey = `savings-${index}`;
+    return renderWeekEntryToggle(
+      `${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+      `
       <div class="entry-fields">
         <label>Amount
           <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklySavingsEntry(${index}, 'amount', this.value)" />
@@ -2049,12 +2112,15 @@ function renderWeeklyTracker() {
       </div>
       <button class="ghost-button" onclick="removeWeeklySavingsEntry(${index})">Remove</button>
     `,
-    false
-  )).join("");
+      [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, false)]
+    );
+  }).join("");
 
-  const goalsEntriesHtml = selectedWeek.goals.map((entry, index) => renderWeekEntryToggle(
-    `${escapeHtml(entry.name || "Goal contribution")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
-    `
+  const goalsEntriesHtml = selectedWeek.goals.map((entry, index) => {
+    const entryKey = `goal-${index}`;
+    return renderWeekEntryToggle(
+      `${escapeHtml(entry.name || "Goal contribution")} • ${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+      `
       <div class="entry-fields">
         <label>Goal
           <select onchange="updateWeeklyGoalEntry(${index}, 'goalId', this.value)">
@@ -2067,6 +2133,9 @@ function renderWeeklyTracker() {
             }).join("")}
           </select>
         </label>
+        <label>Date
+          <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklyGoalEntry(${index}, 'date', this.value)" />
+        </label>
         <label>Amount
           <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyGoalEntry(${index}, 'amount', this.value)" />
         </label>
@@ -2074,15 +2143,21 @@ function renderWeeklyTracker() {
       </div>
       <button class="ghost-button" onclick="removeWeeklyGoalEntry(${index})">Remove</button>
     `,
-    false
-  )).join("");
+      [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, false)]
+    );
+  }).join("");
 
-  const expensesEntriesHtml = selectedWeek.expenses.map((entry, index) => renderWeekEntryToggle(
-    `${escapeHtml(entry.name || "Expense")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
-    `
+  const expensesEntriesHtml = selectedWeek.expenses.map((entry, index) => {
+    const entryKey = `expense-${index}`;
+    return renderWeekEntryToggle(
+      `${escapeHtml(entry.name || "Expense")} • ${escapeHtml(formatDisplayDate(entry.date || "") || "No date")} • ${escapeHtml(formatCurrency(entry.amount || 0))}`,
+      `
       <div class="entry-fields">
         <label>Expense Name
           <input type="text" value="${escapeHtml(entry.name || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'name', this.value)" />
+        </label>
+        <label>Date
+          <input type="date" value="${escapeHtml(entry.date || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'date', this.value)" />
         </label>
         <label>Amount
           <input type="number" min="0" step="0.01" value="${escapeHtml(entry.amount || "")}" onchange="updateWeeklyExpenseEntry(${index}, 'amount', this.value)" />
@@ -2091,8 +2166,9 @@ function renderWeeklyTracker() {
       </div>
       <button class="ghost-button" onclick="removeWeeklyExpenseEntry(${index})">Remove</button>
     `,
-    false
-  )).join("");
+      [entryKey, getWeeklyEntryOpenState(uiStateKey, entryKey, false)]
+    );
+  }).join("");
 
   container.innerHTML = `
     <div class="report-card">
@@ -2112,12 +2188,12 @@ function renderWeeklyTracker() {
           <div class="card"><h4>Total Income</h4><p>${formatCurrency(getWeekIncomeTotal(month, selectedWeek))}</p></div>
         </div>
         <div class="week-detail-grid">
-            ${renderWeekPanel("Weekly Income Entries", incomeTotal, `${incomeEntriesHtml}<button onclick="addIncomeRow()">Add Income</button>`, true)}
-            ${renderWeekPanel("Bills", billsTotal, `${billsEntriesHtml}<button onclick="addWeeklyBillEntry()">Add Bill</button>`, false)}
-            ${renderWeekPanel("Savings", savingsTotal, `${savingsEntriesHtml}<button onclick="addWeeklySavingsEntry()">Add Deposit</button>`, false)}
-            ${renderWeekPanel("Goals", goalsTotal, `${goalsEntriesHtml}<button onclick="addWeeklyGoalEntry()">Add Goal Contribution</button>`, false)}
-            ${renderWeekPanel("Expenses", expensesTotal, `${expensesEntriesHtml}<button onclick="addWeeklyExpenseEntry()">Add Expense</button>`, false)}
-            ${renderWeekPanel("Notes", 0, renderNotesToggle(selectedWeek.notes, `<textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>`, "Week Note"), false)}
+              ${renderWeekPanel("Weekly Income Entries", incomeTotal, `${incomeEntriesHtml}<button onclick="addIncomeRow()">Add Income</button>`, ["panel-income", getWeeklyPanelOpenState(uiStateKey, "panel-income", true)])}
+              ${renderWeekPanel("Bills", billsTotal, `${billsEntriesHtml}<button onclick="addWeeklyBillEntry()">Add Bill</button>`, ["panel-bills", getWeeklyPanelOpenState(uiStateKey, "panel-bills", false)])}
+              ${renderWeekPanel("Savings", savingsTotal, `${savingsEntriesHtml}<button onclick="addWeeklySavingsEntry()">Add Deposit</button>`, ["panel-savings", getWeeklyPanelOpenState(uiStateKey, "panel-savings", false)])}
+              ${renderWeekPanel("Goals", goalsTotal, `${goalsEntriesHtml}<button onclick="addWeeklyGoalEntry()">Add Goal Contribution</button>`, ["panel-goals", getWeeklyPanelOpenState(uiStateKey, "panel-goals", false)])}
+              ${renderWeekPanel("Expenses", expensesTotal, `${expensesEntriesHtml}<button onclick="addWeeklyExpenseEntry()">Add Expense</button>`, ["panel-expenses", getWeeklyPanelOpenState(uiStateKey, "panel-expenses", false)])}
+              ${renderWeekPanel("Notes", 0, renderNotesToggle(selectedWeek.notes, `<textarea oninput="updateWeeklyNotes(this.value)">${escapeHtml(selectedWeek.notes || "")}</textarea>`, "Week Note"), ["panel-notes", getWeeklyPanelOpenState(uiStateKey, "panel-notes", false)])}
         </div>
     </div>
   `;
@@ -2159,7 +2235,7 @@ function updateWeeklyIncomeCategory(field, value) {
 
 function addWeeklyBillEntry() {
   const week = getSelectedWeekData();
-  week.bills.push({ name: "", amount: "", paid: false, notes: "" });
+  week.bills.push({ name: "", date: "", amount: "", paid: false, notes: "" });
   queueActivity(`Added weekly bill in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
@@ -2221,7 +2297,7 @@ function addWeeklyGoalEntry() {
   const month = getSelectedMonthData();
   const week = getSelectedWeekData();
   const firstGoal = month.goals.find((goal) => !goal.completed) || month.goals[0];
-  week.goals.push({ goalId: firstGoal ? firstGoal.id : "", name: firstGoal ? firstGoal.name : "", amount: "", notes: "" });
+  week.goals.push({ goalId: firstGoal ? firstGoal.id : "", name: firstGoal ? firstGoal.name : "", date: "", amount: "", notes: "" });
   queueActivity(`Added weekly goal contribution in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
@@ -2267,7 +2343,7 @@ function removeWeeklyGoalEntry(index) {
 
 function addWeeklyExpenseEntry() {
   const week = getSelectedWeekData();
-  week.expenses.push({ name: "", amount: "", notes: "" });
+  week.expenses.push({ name: "", date: "", amount: "", notes: "" });
   queueActivity(`Added weekly expense in ${week.name}.`);
   saveState();
   renderWeeklyTracker();
