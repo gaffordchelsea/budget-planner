@@ -73,6 +73,7 @@ let activeMonthSection = "overview";
 let activeWeeklyIndex = -1;
 let activeSparkOrderIndex = -1;
 let activeSparkSection = "shifts";
+let activeSparkWeeklyIndex = -1;
 
 let currentUserId = null;
 let authMode = "signIn";
@@ -525,6 +526,18 @@ function scrollToTop() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+function persistLocalState() {
+  if (!plannerState) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(plannerState));
+  } catch (error) {
+    console.error("Failed to save local budget data", error);
+  }
+}
+
 function saveState() {
   const actionLabel = pendingActivityMessage;
   commitPendingActivity();
@@ -553,14 +566,18 @@ function saveState() {
     isApplyingUndo = false;
   }
 
-  if (!currentUserId) {
-    return;
-  }
+  persistLocalState();
+
   clearTimeout(saveStateTimeout);
   saveStateTimeout = setTimeout(() => {
-    getUserDocRef().set({ plannerState }, { merge: true }).catch((error) => {
-      console.error("Failed to save budget data", error);
-    });
+    if (currentUserId) {
+      getUserDocRef().set({ plannerState }, { merge: true }).catch((error) => {
+        console.error("Failed to save budget data", error);
+      });
+      return;
+    }
+
+    persistLocalState();
   }, 500);
 }
 
@@ -689,6 +706,9 @@ function ensureGoalMetadata(month) {
     }
     if (typeof goal.completed !== "boolean") {
       goal.completed = false;
+    }
+    if (typeof goal.collapsed !== "boolean") {
+      goal.collapsed = false;
     }
   });
 
@@ -824,12 +844,10 @@ function formatShortDate(date) {
 }
 
 function createDefaultWeeks(monthName, year) {
-  // July 2026 starts partway through the month. Future Julys use the
-  // normal full-month schedule below.
   if (monthName === "July" && year === 2026) {
     return [
-      createWeekData("Week 1", "2026-07-20", "2026-07-27"),
-      createWeekData("Week 2", "2026-07-28", "2026-07-31")
+      createWeekData("Week 1", "2026-07-20", "2026-07-26"),
+      createWeekData("Week 2", "2026-07-27", "2026-07-31")
     ];
   }
 
@@ -875,33 +893,41 @@ function createWeekData(name, startDate, endDate) {
   };
 }
 
-// Convert the old automatic July schedule only if no entries have been added.
 function migrateUntouchedJuly2026Weeks(month) {
   if (month.name !== "July" || month.year !== 2026 || !Array.isArray(month.weeks)) {
     return;
   }
 
-  const originalStartDates = ["2026-07-01", "2026-07-08", "2026-07-15", "2026-07-22", "2026-07-29"];
-  const isUntouchedDefaultSchedule = month.weeks.length === 5 && month.weeks.every((week, index) => {
-    return week.startDate === originalStartDates[index]
-      && !week.homeHealthIncome
-      && !week.childSupportIncome
-      && !(week.income || []).length
-      && !(week.bills || []).length
-      && !(week.savingsDeposits || []).length
-      && !(week.goals || []).length
-      && !(week.expenses || []).length
-      && !week.notes;
-  });
+  const defaultWeeks = createDefaultWeeks("July", 2026);
+  const hasExpectedLayout = month.weeks.length === defaultWeeks.length
+    && month.weeks.every((week, index) => week.startDate === defaultWeeks[index].startDate && week.endDate === defaultWeeks[index].endDate);
 
-  if (isUntouchedDefaultSchedule) {
-    month.weeks = createDefaultWeeks("July", 2026);
+  if (hasExpectedLayout) {
+    return;
   }
+
+  month.weeks = defaultWeeks.map((week, index) => {
+    const existingWeek = month.weeks[index] || {};
+    return {
+      ...week,
+      ...existingWeek,
+      homeHealthIncome: existingWeek.homeHealthIncome || "",
+      childSupportIncome: existingWeek.childSupportIncome || "",
+      income: Array.isArray(existingWeek.income) ? existingWeek.income : [],
+      bills: Array.isArray(existingWeek.bills) ? existingWeek.bills : [],
+      savingsDeposits: Array.isArray(existingWeek.savingsDeposits) ? existingWeek.savingsDeposits : [],
+      goals: Array.isArray(existingWeek.goals) ? existingWeek.goals : [],
+      expenses: Array.isArray(existingWeek.expenses) ? existingWeek.expenses : [],
+      notes: existingWeek.notes || ""
+    };
+  });
 }
 
 function ensureWeekData(month) {
   if (!Array.isArray(month.weeks) || !month.weeks.length) {
     month.weeks = createDefaultWeeks(month.name, month.year);
+  } else if (month.name === "July" && month.year === 2026) {
+    migrateUntouchedJuly2026Weeks(month);
   }
   return month.weeks;
 }
@@ -1125,6 +1151,38 @@ function getWeekExpensesTotal(week) {
 
 function getWeeklyExpensesTotal(month) {
   return ensureWeekData(month).reduce((sum, week) => sum + getWeekExpensesTotal(week), 0);
+}
+
+function getWeekSparkGasTotal(month, week) {
+  const weekStart = parseDateInput(week.startDate);
+  const weekEnd = parseDateInput(week.endDate);
+  if (!weekStart || !weekEnd || !Array.isArray(month.spark)) {
+    return 0;
+  }
+
+  return month.spark.reduce((sum, entry) => {
+    const acceptedDate = parseDateInput(entry.acceptedDate);
+    if (!acceptedDate || acceptedDate < weekStart || acceptedDate > weekEnd) {
+      return sum;
+    }
+    return sum + (Number(entry.gasExpense) || 0);
+  }, 0);
+}
+
+function getWeekSparkOtherExpenseTotal(month, week) {
+  const weekStart = parseDateInput(week.startDate);
+  const weekEnd = parseDateInput(week.endDate);
+  if (!weekStart || !weekEnd || !Array.isArray(month.spark)) {
+    return 0;
+  }
+
+  return month.spark.reduce((sum, entry) => {
+    const acceptedDate = parseDateInput(entry.acceptedDate);
+    if (!acceptedDate || acceptedDate < weekStart || acceptedDate > weekEnd) {
+      return sum;
+    }
+    return sum + (Number(entry.otherExpense) || 0);
+  }, 0);
 }
 
 function getWeeklyGoalContributionTotal(month, goal) {
@@ -1436,6 +1494,11 @@ function ensureMonthBankSync(month) {
 
 function getCurrentBankSyncBalance(month) {
   const bankSync = ensureMonthBankSync(month);
+  const manualBankBalance = Number(bankSync.currentBankBalance) || 0;
+  if (manualBankBalance > 0) {
+    return manualBankBalance;
+  }
+
   const accountOne = Number(bankSync.accountOneBalance) || 0;
   const accountTwo = Number(bankSync.accountTwoBalance) || 0;
   const accountThree = Number(bankSync.accountThreeBalance) || 0;
@@ -1443,7 +1506,7 @@ function getCurrentBankSyncBalance(month) {
   if (combined > 0) {
     return combined;
   }
-  return Number(bankSync.currentBankBalance) || 0;
+  return 0;
 }
 
 function syncBankSyncInputsFromDom() {
@@ -1476,15 +1539,56 @@ function updateBankSyncField(field, value) {
   const month = getSelectedMonthData();
   const bankSync = ensureMonthBankSync(month);
   bankSync[field] = /Name$/.test(field) ? String(value || "") : Number(value) || 0;
-  bankSync.statusMessage = "";
-  bankSync.debugMessage = "";
+
+  const accountBalances = [
+    Number(bankSync.accountOneBalance) || 0,
+    Number(bankSync.accountTwoBalance) || 0,
+    Number(bankSync.accountThreeBalance) || 0
+  ];
+  const hasAllThreeAccountBalances = accountBalances.every((balance) => balance > 0);
+  const shouldAutoSync = ["accountOneBalance", "accountTwoBalance", "accountThreeBalance", "currentBankBalance"].includes(field)
+    && (hasAllThreeAccountBalances || Number(bankSync.currentBankBalance) > 0);
+
+  if (shouldAutoSync) {
+    const nextAdjustment = getCalculatedBankSyncAdjustment(month, bankSync);
+    bankSync.reconciliationAdjustment = nextAdjustment;
+    bankSync.statusMessage = "Auto-synced to the entered bank totals.";
+    bankSync.debugMessage = `Auto-sync: ${formatCurrency(nextAdjustment)} adjustment.`;
+  } else {
+    bankSync.statusMessage = "";
+    bankSync.debugMessage = "";
+  }
+
   saveState();
   renderDashboard();
   renderReports();
+  renderBankSyncSummaryCards(month, bankSync);
 }
 
 function roundCurrencyAmount(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function getWeekBankSyncAppBalance(month, week = getSelectedWeekData()) {
+  const actualSavings = getWeekSavingsTotal(week);
+  const goalContributions = (week.goals || []).reduce((sum, entry) => sum + (Number(entry.amount) || 0), 0);
+  const weekBalance = roundCurrencyAmount(
+    getWeekIncomeTotal(month, week)
+    - getWeekBillsTotal(week)
+    - getWeekExpensesTotal(week)
+    - actualSavings
+    - goalContributions
+    - getWeekSparkGasTotal(month, week)
+    - getWeekSparkOtherExpenseTotal(month, week)
+  );
+  const startingBalance = roundCurrencyAmount(getStartingBankBalance(month));
+  return roundCurrencyAmount(weekBalance + startingBalance);
+}
+
+function getCalculatedBankSyncAdjustment(month, bankSync = ensureMonthBankSync(month)) {
+  const bankBalance = roundCurrencyAmount(getCurrentBankSyncBalance(month));
+  const currentAppBalance = roundCurrencyAmount(getWeekBankSyncAppBalance(month));
+  return roundCurrencyAmount(bankBalance - currentAppBalance);
 }
 
 function applyBankSyncDifference() {
@@ -1492,15 +1596,11 @@ function applyBankSyncDifference() {
   const bankSync = syncBankSyncInputsFromDom() || ensureMonthBankSync(month);
   try {
     bankSyncClickCount += 1;
-    const bankBalance = roundCurrencyAmount(getCurrentBankSyncBalance(month));
-    const existingAdjustment = roundCurrencyAmount(Number(bankSync.reconciliationAdjustment) || 0);
-    const currentAppBalance = roundCurrencyAmount(getRemainingAmount(month));
-    const unadjustedAppBalance = roundCurrencyAmount(currentAppBalance - existingAdjustment);
-    const nextAdjustment = roundCurrencyAmount(bankBalance - unadjustedAppBalance);
+    const nextAdjustment = getCalculatedBankSyncAdjustment(month, bankSync);
 
     bankSync.reconciliationAdjustment = nextAdjustment;
     bankSync.statusMessage = `Applied. Adjustment set to ${formatCurrency(bankSync.reconciliationAdjustment)}.`;
-    bankSync.debugMessage = `Click ${bankSyncClickCount}. Bank ${formatCurrency(bankBalance)} | App ${formatCurrency(currentAppBalance)} | Existing Adj ${formatCurrency(existingAdjustment)} | Unadjusted App ${formatCurrency(unadjustedAppBalance)} | New Adj ${formatCurrency(nextAdjustment)}`;
+    bankSync.debugMessage = `Click ${bankSyncClickCount}. Adjustment set to ${formatCurrency(nextAdjustment)}.`;
     queueActivity("Applied bank sync difference.");
     saveState();
     renderMonthSections();
@@ -1531,6 +1631,64 @@ function clearBankSyncAdjustment() {
   renderReports();
 }
 
+function renderBankSyncSummaryCards(month, bankSync = ensureMonthBankSync(month)) {
+  const container = document.getElementById("bankSyncSummaryCards");
+  const accountOneName = String(bankSync.accountOneName || "").trim() || "Bank App 1";
+  const accountTwoName = String(bankSync.accountTwoName || "").trim() || "Bank App 2";
+  const accountThreeName = String(bankSync.accountThreeName || "").trim() || "Bank App 3";
+  const accountOneBalance = Number(bankSync.accountOneBalance) || 0;
+  const accountTwoBalance = Number(bankSync.accountTwoBalance) || 0;
+  const accountThreeBalance = Number(bankSync.accountThreeBalance) || 0;
+  const currentBankBalance = getCurrentBankSyncBalance(month);
+  const reconciliationAdjustment = Number(bankSync.reconciliationAdjustment) || 0;
+  const activeWeek = getSelectedWeekData();
+  const appBalance = getWeekBankSyncAppBalance(month, activeWeek);
+  const hasEnteredBankTotals = currentBankBalance > 0 && (accountOneBalance > 0 || accountTwoBalance > 0 || accountThreeBalance > 0 || Number(bankSync.currentBankBalance) > 0);
+  const displayedWeekBalance = hasEnteredBankTotals ? currentBankBalance : roundCurrencyAmount(appBalance + reconciliationAdjustment);
+  const adjustmentNeeded = roundCurrencyAmount(currentBankBalance - appBalance);
+  const difference = roundCurrencyAmount(currentBankBalance - displayedWeekBalance);
+  const isUsingCombinedBalances = accountOneBalance > 0 || accountTwoBalance > 0 || accountThreeBalance > 0;
+
+  const combinedBankBalanceInput = document.getElementById("bankSyncCombinedBalanceValue");
+  if (combinedBankBalanceInput) {
+    combinedBankBalanceInput.value = formatCurrency(currentBankBalance);
+  }
+
+  const weekBalanceValue = document.getElementById("bankSyncWeekBalanceValue");
+  if (weekBalanceValue) {
+    weekBalanceValue.textContent = formatCurrency(displayedWeekBalance);
+  }
+
+  const bankBalanceValue = document.getElementById("bankSyncBankBalanceValue");
+  if (bankBalanceValue) {
+    bankBalanceValue.textContent = formatCurrency(currentBankBalance);
+  }
+
+  const differenceValue = document.getElementById("bankSyncDifferenceValue");
+  if (differenceValue) {
+    differenceValue.textContent = formatCurrency(difference);
+  }
+
+  const adjustmentValue = document.getElementById("bankSyncAdjustmentValue");
+  if (adjustmentValue) {
+    adjustmentValue.textContent = formatCurrency(adjustmentNeeded);
+  }
+
+  const noteArea = document.getElementById("bankSyncNoteArea");
+  if (noteArea) {
+    noteArea.innerHTML = `
+      <p class="spark-note">${isUsingCombinedBalances ? "Combined Bank Balance is using the three bank app fields above." : "If you do not enter all three app balances yet, you can use Manual Combined Balance."}</p>
+      <p class="spark-note">Enter the totals for all three bank accounts and the reconciliation adjustment will update automatically for the active week once they are all filled in.</p>
+      <p class="spark-note">After you type the adjustment, the App Balance should move toward your Bank Balance automatically.</p>
+    `;
+  }
+
+  const reconciliationInput = document.getElementById("bankSyncReconciliationAdjustment");
+  if (reconciliationInput && bankSync.reconciliationAdjustment !== undefined && document.activeElement !== reconciliationInput) {
+    reconciliationInput.value = String(Number(bankSync.reconciliationAdjustment) || 0);
+  }
+}
+
 function renderBankSyncSection(containerId = "bankSyncPageArea") {
   const month = getSelectedMonthData();
   const container = document.getElementById(containerId);
@@ -1541,20 +1699,14 @@ function renderBankSyncSection(containerId = "bankSyncPageArea") {
   const bankSync = ensureMonthBankSync(month);
   const startingBalance = Number(bankSync.startingBalance) || 0;
   const accountOneName = String(bankSync.accountOneName || "").trim() || "Bank App 1";
-  const accountOneBalance = Number(bankSync.accountOneBalance) || 0;
   const accountTwoName = String(bankSync.accountTwoName || "").trim() || "Bank App 2";
-  const accountTwoBalance = Number(bankSync.accountTwoBalance) || 0;
   const accountThreeName = String(bankSync.accountThreeName || "").trim() || "Bank App 3";
+  const accountOneBalance = Number(bankSync.accountOneBalance) || 0;
+  const accountTwoBalance = Number(bankSync.accountTwoBalance) || 0;
   const accountThreeBalance = Number(bankSync.accountThreeBalance) || 0;
   const manualBankBalance = Number(bankSync.currentBankBalance) || 0;
   const currentBankBalance = getCurrentBankSyncBalance(month);
   const reconciliationAdjustment = Number(bankSync.reconciliationAdjustment) || 0;
-  const appBalance = getRemainingAmount(month);
-  const difference = roundCurrencyAmount(currentBankBalance - appBalance);
-  const existingAdjustment = roundCurrencyAmount(reconciliationAdjustment);
-  const unadjustedAppBalance = roundCurrencyAmount(appBalance - existingAdjustment);
-  const adjustmentNeeded = roundCurrencyAmount(currentBankBalance - unadjustedAppBalance);
-  const isUsingCombinedBalances = accountOneBalance > 0 || accountTwoBalance > 0 || accountThreeBalance > 0;
 
   container.innerHTML = `
     <div class="report-card">
@@ -1585,23 +1737,23 @@ function renderBankSyncSection(containerId = "bankSyncPageArea") {
           <input id="bankSyncCurrentBankBalance" type="number" step="0.01" value="${escapeHtml(manualBankBalance || "")}" oninput="updateBankSyncField('currentBankBalance', this.value)" />
         </label>
         <label>Combined Bank Balance
-          <input type="text" value="${escapeHtml(formatCurrency(currentBankBalance))}" readonly />
+          <input id="bankSyncCombinedBalanceValue" type="text" value="${escapeHtml(formatCurrency(currentBankBalance))}" readonly />
         </label>
         <label>Reconciliation Adjustment
           <input id="bankSyncReconciliationAdjustment" type="number" step="0.01" value="${escapeHtml(reconciliationAdjustment || "")}" oninput="updateBankSyncField('reconciliationAdjustment', this.value)" />
         </label>
       </div>
-      <p class="spark-note">${isUsingCombinedBalances ? "Combined Bank Balance is using the three bank app fields above." : "If you do not enter all three app balances yet, you can use Manual Combined Balance."}</p>
-      <p class="spark-note">Type the Adjustment Needed amount into Reconciliation Adjustment.</p>
-      <div class="dashboard-cards">
-        <div class="card"><h4>App Balance</h4><p>${formatCurrency(appBalance)}</p></div>
-        <div class="card"><h4>Bank Balance</h4><p>${formatCurrency(currentBankBalance)}</p></div>
-        <div class="card"><h4>Difference</h4><p>${formatCurrency(difference)}</p></div>
-        <div class="card"><h4>Adjustment Needed</h4><p>${formatCurrency(adjustmentNeeded)}</p></div>
+      <div id="bankSyncNoteArea"></div>
+      <div id="bankSyncSummaryCards" class="dashboard-cards">
+        <div class="card"><h4>Week Balance</h4><p id="bankSyncWeekBalanceValue">${formatCurrency(0)}</p></div>
+        <div class="card"><h4>Bank Balance</h4><p id="bankSyncBankBalanceValue">${formatCurrency(currentBankBalance)}</p></div>
+        <div class="card"><h4>Difference</h4><p id="bankSyncDifferenceValue">${formatCurrency(0)}</p></div>
+        <div class="card"><h4>Adjustment Needed</h4><p id="bankSyncAdjustmentValue">${formatCurrency(0)}</p></div>
       </div>
-      <p class="spark-note">After you type the adjustment, the App Balance should move toward your Bank Balance automatically.</p>
     </div>
   `;
+
+  renderBankSyncSummaryCards(month, bankSync);
 }
 
 function renderWeekEntryToggle(summary, content, isOpen = false) {
@@ -2212,6 +2364,23 @@ function renderOverviewSection() {
   const goalValue = getGoalProgressValue(month);
   const remaining = getRemainingAmount(month);
   const health = getHealthScore(month);
+  const goalsHtml = (month.goals || [])
+    .filter((goal) => !goal.completed)
+    .map((goal, index) => `
+      <div class="entry-card">
+        <div class="entry-fields">
+          <label>${escapeHtml(goal.name || "Goal")}
+            <input type="number" min="0" step="0.01" id="goal-quick-add-${index}" placeholder="Add amount" />
+          </label>
+          <button class="ghost-button" onclick="addGoalAmountFromOverview(${index})">Add</button>
+        </div>
+        <div class="progress-block">
+          <div class="progress-bar"><span style="width:${getGoalProgressForMonth(month, goal)}%; background:#d81b6b;"></span></div>
+          <p>${formatCurrency(getGoalCurrentAmount(month, goal))} / ${formatCurrency(Number(goal.targetAmount) || 0)} • ${getGoalProgressForMonth(month, goal)}%</p>
+        </div>
+      </div>
+    `)
+    .join("");
 
   overviewCards.innerHTML = `
     <div class="card"><h4>Income</h4><p>${formatCurrency(incomeTotal)}</p></div>
@@ -2220,6 +2389,10 @@ function renderOverviewSection() {
     <div class="card"><h4>Remaining</h4><p>${formatCurrency(remaining)}</p></div>
     <div class="card"><h4>Goal Progress</h4><p>${goalValue}%</p></div>
     <div class="card"><h4>Health Score</h4><p>${health} / 100</p></div>
+    <div class="report-card">
+      <h4>Goal Quick Add</h4>
+      ${goalsHtml || '<p class="spark-note">No active goals yet.</p>'}
+    </div>
   `;
 }
 
@@ -2487,34 +2660,49 @@ function renderGoalsSection() {
     const barColor = colors[realIndex % colors.length];
     const isLockedCompletedGoal = lockCompletedGoals && goal.completed;
     const disabledAttr = isLockedCompletedGoal ? "disabled" : "";
+    const isCollapsed = Boolean(goal.collapsed);
+    const contentHtml = isCollapsed ? `
+      <div class="progress-block">
+        <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
+        <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
+      </div>
+    ` : `
+      <div class="entry-fields">
+        <label>Goal Name
+          <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${realIndex}, 'name', this.value)" ${disabledAttr} />
+        </label>
+        <label>Target Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${realIndex}, 'targetAmount', this.value)" ${disabledAttr} />
+        </label>
+        <label>Current Amount
+          <input type="number" min="0" step="0.01" value="${escapeHtml(totalSaved || "")}" onchange="updateGoalTotalAmount(${realIndex}, this.value)" ${disabledAttr} />
+        </label>
+        <label>Added from Weekly Contributions
+          <input type="number" value="${escapeHtml(contributionAmount || "")}" readonly />
+        </label>
+        ${renderNotesToggle(goal.notes, `<textarea onchange="updateGoalField(${realIndex}, 'notes', this.value)" ${disabledAttr}>${escapeHtml(goal.notes || "")}</textarea>`)}
+      </div>
+      <div class="progress-block">
+        <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
+        <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
+        ${isLockedCompletedGoal ? '<p class="spark-note goal-locked-note">Completed goal is locked. Turn off Lock Completed Goals to edit.</p>' : ""}
+      </div>
+    `;
     return `
       <div class="entry-card${goal.completed ? " goal-completed" : ""}">
-        <div class="entry-fields">
-          <label>Goal Name
-            <input type="text" value="${escapeHtml(goal.name || "")}" onchange="updateGoalField(${realIndex}, 'name', this.value)" ${disabledAttr} />
-          </label>
-          <label>Target Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(goal.targetAmount || "")}" onchange="updateGoalField(${realIndex}, 'targetAmount', this.value)" ${disabledAttr} />
-          </label>
-          <label>Current Amount
-            <input type="number" min="0" step="0.01" value="${escapeHtml(totalSaved || "")}" onchange="updateGoalTotalAmount(${realIndex}, this.value)" ${disabledAttr} />
-          </label>
-          <label>Added from Weekly Contributions
-            <input type="number" value="${escapeHtml(contributionAmount || "")}" readonly />
-          </label>
-          ${renderNotesToggle(goal.notes, `<textarea onchange="updateGoalField(${realIndex}, 'notes', this.value)" ${disabledAttr}>${escapeHtml(goal.notes || "")}</textarea>`)}
+        <div class="goal-footer">
+          <strong>${escapeHtml(goal.name || "Goal")}</strong>
+          <div class="entry-actions">
+            <button class="ghost-button" onclick="toggleGoalCollapse(${realIndex})">${isCollapsed ? "Expand" : "Collapse"}</button>
+            <button class="ghost-button" onclick="removeGoal(${realIndex})" ${disabledAttr}>Remove</button>
+          </div>
         </div>
-        <div class="progress-block">
-          <div class="progress-bar"><span style="width:${progress}%; background:${barColor};"></span></div>
-          <p>${formatCurrency(totalSaved)} saved • ${progress}% complete</p>
-          ${isLockedCompletedGoal ? '<p class="spark-note goal-locked-note">Completed goal is locked. Turn off Lock Completed Goals to edit.</p>' : ""}
-        </div>
+        ${contentHtml}
         <div class="goal-footer">
           <label class="checkbox-label">
             <input type="checkbox" ${goal.completed ? "checked" : ""} onchange="toggleGoalCompleted(${realIndex})" ${disabledAttr} />
             Mark as Done
           </label>
-          <button class="ghost-button" onclick="removeGoal(${realIndex})" ${disabledAttr}>Remove</button>
         </div>
       </div>
     `;
@@ -2601,6 +2789,8 @@ function renderSparkTrackerPage() {
     return;
   }
 
+  const weeks = ensureWeekData(month);
+
   container.innerHTML = `
     <h2>Spark Tracker</h2>
     <p>Choose the month, then add each shift. A shift's accepted date automatically counts its earnings in the matching budget week.</p>
@@ -2613,6 +2803,13 @@ function renderSparkTrackerPage() {
 
     <h3>${month.name} ${month.year}</h3>
     <p>Spark Received This Month: <span id="sparkMonthTotal">$0</span></p>
+
+    <div class="week-nav-buttons">
+      <button class="week-button ${activeSparkWeeklyIndex < 0 ? "active" : ""}" onclick="showSparkWeeklyOverview()">Monthly Summary</button>
+      ${weeks.map((week, index) => `
+        <button class="week-button ${activeSparkWeeklyIndex === index ? "active" : ""}" onclick="showSparkWeek(${index})">${week.name}</button>
+      `).join("")}
+    </div>
 
     <div class="month-tab-buttons">
       <button data-spark-section="shifts" class="${activeSparkSection === "shifts" ? "active" : ""}" onclick="showSparkTrackerTab('shifts')">Shifts</button>
@@ -2631,6 +2828,7 @@ function renderSparkTrackerPage() {
 function openSparkMonth(monthName) {
   activeMonthName = monthName;
   activeWeeklyIndex = -1;
+  activeSparkWeeklyIndex = -1;
   plannerState.lastOpenedMonth = monthName;
   saveState();
   renderMonthButtons();
@@ -2638,6 +2836,16 @@ function openSparkMonth(monthName) {
   renderSparkTrackerPage();
   renderDashboard();
   renderReports();
+}
+
+function showSparkWeek(index) {
+  activeSparkWeeklyIndex = index;
+  renderSparkTrackerPage();
+}
+
+function showSparkWeeklyOverview() {
+  activeSparkWeeklyIndex = -1;
+  renderSparkTrackerPage();
 }
 
 function showSparkTrackerTab(section) {
@@ -2669,7 +2877,57 @@ function renderSparkSection() {
     return;
   }
 
-  const summary = getSparkSummary(month);
+  const weeks = ensureWeekData(month);
+  const selectedWeek = activeSparkWeeklyIndex >= 0 && weeks[activeSparkWeeklyIndex]
+    ? weeks[activeSparkWeeklyIndex]
+    : null;
+  const monthSummary = getSparkSummary(month);
+  const weekStart = selectedWeek ? parseDateInput(selectedWeek.startDate) : null;
+  const weekEnd = selectedWeek ? parseDateInput(selectedWeek.endDate) : null;
+  const weekSparkEntries = selectedWeek && weekStart && weekEnd
+    ? month.spark.filter((entry) => {
+      const acceptedDate = parseDateInput(entry.acceptedDate);
+      return acceptedDate && acceptedDate >= weekStart && acceptedDate <= weekEnd;
+    })
+    : month.spark;
+  const weekTips = selectedWeek && weekStart && weekEnd
+    ? (Array.isArray(month.sparkTips) ? month.sparkTips.filter((tip) => {
+      const receivedDate = parseDateInput(tip.receivedDate);
+      return receivedDate && receivedDate >= weekStart && receivedDate <= weekEnd;
+    }) : [])
+    : (Array.isArray(month.sparkTips) ? month.sparkTips : []);
+  const weekSparkIncome = selectedWeek ? getWeeklySparkIncome(month, selectedWeek) : monthSummary.totalEarnings;
+  const weekOrders = weekSparkEntries.length;
+  const weekTipsReceived = weekTips.reduce((sum, tip) => sum + (Number(tip.amount) || 0), 0);
+  const weekEstimatedTips = weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.estimatedTip) || 0), 0);
+  const weekPendingTips = Math.max(0, weekEstimatedTips - weekTipsReceived);
+  const weekGasTotal = selectedWeek ? getWeekSparkGasTotal(month, selectedWeek) : monthSummary.gasTotal;
+  const weekOtherExpense = selectedWeek ? getWeekSparkOtherExpenseTotal(month, selectedWeek) : monthSummary.otherExpense;
+  const weekNetProfit = weekSparkIncome - weekGasTotal - weekOtherExpense;
+  const weekProjectedEarnings = weekSparkIncome + weekPendingTips;
+  const summary = selectedWeek
+    ? {
+      orders: weekOrders,
+      totalBasePay: weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.actualBasePay) || Number(entry.estimatedBasePay) || 0), 0),
+      tipsReceived: weekTipsReceived,
+      pendingTips: weekPendingTips,
+      totalEarnings: weekSparkIncome,
+      projectedEarnings: weekProjectedEarnings,
+      averageEarningsPerOrder: weekOrders ? weekSparkIncome / weekOrders : 0,
+      estimatedMiles: weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.estimatedMiles) || 0), 0),
+      actualMiles: weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.actualMiles) || 0), 0),
+      earningsPerMile: weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.actualMiles) || 0), 0) > 0
+        ? weekSparkIncome / weekSparkEntries.reduce((sum, entry) => sum + (Number(entry.actualMiles) || 0), 0)
+        : 0,
+      earningsPerHour: weekSparkEntries.reduce((sum, entry) => sum + ((Number(entry.actualHours) * 60 + Number(entry.actualMinutes)) || 0), 0) > 0
+        ? weekSparkIncome / (weekSparkEntries.reduce((sum, entry) => sum + ((Number(entry.actualHours) * 60 + Number(entry.actualMinutes)) || 0), 0) / 60)
+        : 0,
+      gasTotal: weekGasTotal,
+      otherExpense: weekOtherExpense,
+      netProfit: weekNetProfit
+    }
+    : monthSummary;
+
   if (total) {
     total.textContent = formatCurrency(summary.totalEarnings);
   }
@@ -2729,8 +2987,8 @@ function renderSparkSection() {
         </div>
         <div class="tip-bucket">
           <h5>Received Tips</h5>
-          ${Array.isArray(month.sparkTips) && month.sparkTips.length
-            ? month.sparkTips.map((tip, index) => `
+          ${weekTips.length
+            ? weekTips.map((tip, index) => `
                 <div class="tip-entry">
                   <div class="entry-fields">
                     <label>Amount
@@ -2746,10 +3004,10 @@ function renderSparkSection() {
             : '<p class="spark-note">No received tips yet.</p>'}
         </div>
       </div>
-      <p class="spark-note">Add a received tip here and it will count toward your Spark income for the month.</p>
+      <p class="spark-note">Add a received tip here and it will count toward your Spark income for the selected week.</p>
     </div>
 
-    ${month.spark.map((entry, index) => `
+    ${weekSparkEntries.map((entry, index) => `
       <div class="entry-card spark-order-card" id="spark-order-${index}">
         <div class="spark-order-header">
           <h4>Order ${index + 1}</h4>
@@ -3044,31 +3302,27 @@ function runRecalculateCheck() {
 
   if (hasWeeklyIncomeEntries(month)) {
     const weeklyIncome = getWeeklyIncomeTotal(month);
+    const monthlyIncome = getMonthlyIncome(month);
+    if (Math.abs(weeklyIncome - monthlyIncome) > 0.01) {
+      notes.push("Weekly income totals and the monthly income summary are using slightly different sources.");
+    }
+
     const weeklyCategoryIncome = ensureWeekData(month).reduce((sum, week) => {
       return sum + (Number(week.homeHealthIncome) || 0) + (Number(week.childSupportIncome) || 0);
     }, 0);
     const weeklySparkIncome = ensureWeekData(month).reduce((sum, week) => sum + getWeeklySparkIncome(month, week), 0);
-    const monthlyEntryIncome = (month.income || []).reduce((sum, entry) => {
-      if (/spark/i.test(entry.source || "")) {
-        return sum;
-      }
-      return sum + (Number(entry.amount) || 0);
-    }, 0) + weeklySparkIncome + weeklyCategoryIncome;
-    if (Math.abs(weeklyIncome - monthlyEntryIncome) > 0.01) {
-      warnings.push("Monthly income total does not match weekly-tracked income total.");
-    }
 
     const sparkReceivedIncome = getSparkSummary(month).totalEarnings;
     if (Math.abs(weeklySparkIncome - sparkReceivedIncome) > 0.01) {
       notes.push("Spark weekly-tracked income uses order payouts, which can differ from received Spark earnings if tips are still pending.");
     }
 
-    const undatedIncome = (month.income || []).some((entry) => {
+    const undatedIncomeEntries = (month.income || []).filter((entry) => {
       const amount = Number(entry.amount) || 0;
       return amount > 0 && !/spark/i.test(entry.source || "") && !entry.date;
     });
-    if (undatedIncome) {
-      warnings.push("Some income entries have amounts but no date. In weekly mode, undated income is excluded.");
+    if (undatedIncomeEntries.length) {
+      notes.push(`${undatedIncomeEntries.length} income entry${undatedIncomeEntries.length > 1 ? "ies" : "y"} have no date and are ignored in weekly mode.`);
     }
   }
 
@@ -3137,6 +3391,10 @@ function renderDashboard() {
   const homeHealthIncome = document.getElementById("homeHealthIncome");
   const sparkIncome = document.getElementById("sparkIncome");
   const childSupportIncome = document.getElementById("childSupportIncome");
+  const dashboardBankSyncWeekBalance = document.getElementById("dashboardBankSyncWeekBalance");
+  const dashboardBankSyncBankBalance = document.getElementById("dashboardBankSyncBankBalance");
+  const dashboardBankSyncDifference = document.getElementById("dashboardBankSyncDifference");
+  const dashboardBankSyncAdjustment = document.getElementById("dashboardBankSyncAdjustment");
   const dashboardGoalProgress = document.getElementById("dashboardGoalProgress");
   const healthScore = document.getElementById("healthScore");
 
@@ -3148,7 +3406,7 @@ function renderDashboard() {
   const savingsTabTargetAmount = Number(month.carFundTargetAmount || 0);
   const savingsTabRemainingAmount = Math.max(0, savingsTabTargetAmount - savingsTabContributedAmount);
 
-  if (dashboardIncome) dashboardIncome.textContent = formatCurrency(getMonthlyIncome(month));
+  if (dashboardIncome) dashboardIncome.textContent = formatCurrency(getIncomeForDisplay(month));
   if (dashboardBills) dashboardBills.textContent = formatCurrency(getMonthlyBills(month));
   if (dashboardSavings) dashboardSavings.textContent = formatCurrency(getMonthlySavings(month));
   if (dashboardRemaining) dashboardRemaining.textContent = formatCurrency(getRemainingAmount(month));
@@ -3163,6 +3421,18 @@ function renderDashboard() {
   if (homeHealthIncome) homeHealthIncome.textContent = formatCurrency(getSourceIncome(month, "Main Job"));
   if (sparkIncome) sparkIncome.textContent = formatCurrency(getSourceIncome(month, "Walmart/Spark"));
   if (childSupportIncome) childSupportIncome.textContent = formatCurrency(getSourceIncome(month, "Child Support"));
+
+  const bankSync = ensureMonthBankSync(month);
+  const dashboardBankBalance = getCurrentBankSyncBalance(month);
+  const dashboardAppBalance = getWeekBankSyncAppBalance(month, getSelectedWeekData());
+  const dashboardDisplayedWeekBalance = dashboardBankBalance > 0 ? dashboardBankBalance : roundCurrencyAmount(dashboardAppBalance + (Number(bankSync.reconciliationAdjustment) || 0));
+  const dashboardAdjustmentNeeded = roundCurrencyAmount(dashboardBankBalance - dashboardAppBalance);
+  const dashboardDifference = roundCurrencyAmount(dashboardBankBalance - dashboardDisplayedWeekBalance);
+
+  if (dashboardBankSyncWeekBalance) dashboardBankSyncWeekBalance.textContent = formatCurrency(dashboardDisplayedWeekBalance);
+  if (dashboardBankSyncBankBalance) dashboardBankSyncBankBalance.textContent = formatCurrency(dashboardBankBalance);
+  if (dashboardBankSyncDifference) dashboardBankSyncDifference.textContent = formatCurrency(dashboardDifference);
+  if (dashboardBankSyncAdjustment) dashboardBankSyncAdjustment.textContent = formatCurrency(dashboardAdjustmentNeeded);
 
   if (dashboardGoalProgress) {
     dashboardGoalProgress.innerHTML = month.goals.map((goal) => `
@@ -3347,6 +3617,7 @@ function updateBillField(index, field, value) {
   saveState();
   renderDashboard();
   renderReports();
+  renderMonthSections();
 }
 
 function removeBillRow(index) {
@@ -3359,9 +3630,10 @@ function removeBillRow(index) {
 }
 
 function addGoal() {
-  getSelectedMonthData().goals.push({ id: createGoalId(), name: "New Goal", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, notes: "" });
+  getSelectedMonthData().goals.push({ id: createGoalId(), name: "New Goal", targetAmount: 1000, currentAmount: 0, addedAmount: 0, completed: false, collapsed: false, notes: "" });
   saveState();
   renderGoalsSection();
+  renderOverviewSection();
   renderDashboard();
   renderReports();
 }
@@ -3375,8 +3647,10 @@ function updateGoalField(index, field, value) {
   queueActivity("Updated monthly goal.");
   saveState();
   renderGoalsSection();
+  renderOverviewSection();
   renderDashboard();
   renderReports();
+  renderMonthSections();
 }
 
 function updateGoalTotalAmount(index, value) {
@@ -3396,6 +3670,7 @@ function updateGoalTotalAmount(index, value) {
   queueActivity("Updated monthly goal total amount.");
   saveState();
   renderGoalsSection();
+  renderOverviewSection();
   renderDashboard();
   renderReports();
 }
@@ -3409,8 +3684,43 @@ function removeGoal(index) {
   queueActivity("Removed monthly goal.");
   saveState();
   renderGoalsSection();
+  renderOverviewSection();
   renderDashboard();
   renderReports();
+}
+
+function addGoalAmountFromOverview(index) {
+  const month = getSelectedMonthData();
+  const goal = month.goals[index];
+  if (!goal) {
+    return;
+  }
+
+  const input = document.getElementById(`goal-quick-add-${index}`);
+  const amount = Number(input ? input.value : "") || 0;
+  if (!amount) {
+    return;
+  }
+
+  goal.currentAmount = (Number(goal.currentAmount) || 0) + amount;
+  queueActivity(`Added ${formatCurrency(amount)} to ${goal.name || "goal"}.`);
+  saveState();
+  renderGoalsSection();
+  renderOverviewSection();
+  renderDashboard();
+  renderReports();
+}
+
+function toggleGoalCollapse(index) {
+  const month = getSelectedMonthData();
+  const goal = month.goals[index];
+  if (!goal) {
+    return;
+  }
+
+  goal.collapsed = !goal.collapsed;
+  saveState();
+  renderGoalsSection();
 }
 
 function toggleGoalCompleted(index) {
@@ -3421,10 +3731,19 @@ function toggleGoalCompleted(index) {
   if (plannerState.settings.lockCompletedGoals && month.goals[index].completed) {
     return;
   }
-  month.goals[index].completed = !month.goals[index].completed;
-  queueActivity(month.goals[index].completed ? "Marked goal as done." : "Moved goal back to active.");
+
+  const goal = month.goals[index];
+  goal.completed = !goal.completed;
+  if (goal.completed) {
+    const targetAmount = Number(goal.targetAmount) || 0;
+    const currentAmount = Number(goal.currentAmount) || 0;
+    goal.currentAmount = Math.max(currentAmount, targetAmount);
+  }
+
+  queueActivity(goal.completed ? "Marked goal as done." : "Moved goal back to active.");
   saveState();
   renderGoalsSection();
+  renderOverviewSection();
   renderDashboard();
   renderReports();
 }
@@ -3453,6 +3772,7 @@ function updateCarFundEntry(index, field, value) {
   renderCarFundSection();
   renderDashboard();
   renderReports();
+  renderMonthSections();
 }
 
 function removeCarFundEntry(index) {
@@ -3617,6 +3937,7 @@ function updateAssignmentField(index, field, value) {
   renderAssignmentSection();
   renderDashboard();
   renderReports();
+  renderMonthSections();
 }
 
 function removeAssignmentCategory(index) {
@@ -3718,6 +4039,14 @@ function getMonthlyIncome(month) {
   return nonSparkIncome + getSparkSummary(month).totalEarnings;
 }
 
+function getIncomeForDisplay(month) {
+  const bankSyncBalance = getCurrentBankSyncBalance(month);
+  if (bankSyncBalance > 0) {
+    return bankSyncBalance;
+  }
+  return getMonthlyIncome(month);
+}
+
 function getMonthlyBills(month) {
   const weeklyBills = getWeeklyBillsTotal(month);
   if (hasWeeklyBillEntries(month)) {
@@ -3806,19 +4135,7 @@ function getReconciliationAdjustment(month) {
 }
 
 function getRemainingAmount(month) {
-  const actualSavings = hasWeeklySavingsEntries(month) ? getWeeklySavingsTotal(month) : 0;
-  const goalContributions = hasWeeklyGoalEntries(month)
-    ? getWeeklyGoalContributionsTotal(month)
-    : month.goals.reduce((sum, goal) => sum + (Number(goal.currentAmount) || 0), 0);
-  return getMonthlyIncome(month)
-    - getMonthlyPaidBills(month)
-    - getWeeklyExpensesTotal(month)
-    - actualSavings
-    - goalContributions
-    - getSparkGasTotal(month)
-    - getSparkOtherExpenseTotal(month)
-    + getStartingBankBalance(month)
-    + getReconciliationAdjustment(month);
+  return getIncomeForDisplay(month);
 }
 
 function getGoalProgress(goal) {
@@ -4080,6 +4397,8 @@ window.addGoal = addGoal;
 window.updateGoalField = updateGoalField;
 window.updateGoalTotalAmount = updateGoalTotalAmount;
 window.removeGoal = removeGoal;
+window.addGoalAmountFromOverview = addGoalAmountFromOverview;
+window.toggleGoalCollapse = toggleGoalCollapse;
 window.toggleGoalCompleted = toggleGoalCompleted;
 window.addCarFundEntry = addCarFundEntry;
 window.updateCarFundTarget = updateCarFundTarget;
